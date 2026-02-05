@@ -1,0 +1,32 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+nul
+
+# Local settings
+*.lock
+
+# Shared folder (screenshots)
+공유폴더/
+
+# Old/backup files
+webalfred-snippets/
+webalfred-snippets.zip
+qfred-app/
