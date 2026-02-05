@@ -1,5 +1,5 @@
 """
-Qfred - Smart Snippet Manager for Windows (PyQt6 Version)
+Q-fred - Smart Snippet Manager for Windows (PyQt6 Version)
 시스템 전역에서 단축어를 감지하고 치환하는 프로그램
 """
 
@@ -11,9 +11,15 @@ import time
 import pyperclip
 import uuid
 import ctypes
+import winreg
+import urllib.request
 from datetime import datetime
 from pynput import keyboard as pynput_keyboard
 from pynput.keyboard import Key, Controller
+
+# 앱 버전
+APP_VERSION = "1.0.0"
+APP_NAME = "Q-fred"
 
 # 콘솔 창 숨기기
 def hide_console():
@@ -29,14 +35,149 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QTextEdit, QPushButton, QListWidget, QListWidgetItem,
     QFrame, QScrollArea, QSystemTrayIcon, QMenu, QSplitter, QMessageBox,
-    QSizePolicy, QStackedWidget, QSpacerItem
+    QSizePolicy, QStackedWidget, QSpacerItem, QDialog, QFileDialog, QCheckBox
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QObject, QTimer, QEvent
 from PyQt6.QtGui import QIcon, QPixmap, QFont, QColor, QPalette, QAction, QFontDatabase, QCursor
 
+# Google Sheets 동기화 모듈
+try:
+    from google_sheets_sync import GoogleSheetsSync
+    GOOGLE_SHEETS_AVAILABLE = True
+except ImportError:
+    GOOGLE_SHEETS_AVAILABLE = False
+
 # 설정 파일 경로
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+# PyInstaller exe로 실행 시 exe 파일 위치, 스크립트 실행 시 스크립트 위치 사용
+if getattr(sys, 'frozen', False):
+    # exe로 빌드된 경우 - exe 파일이 있는 디렉토리
+    APP_DIR = os.path.dirname(sys.executable)
+else:
+    # 스크립트로 실행되는 경우
+    APP_DIR = os.path.dirname(os.path.abspath(__file__))
 SNIPPETS_FILE = os.path.join(APP_DIR, "snippets.json")
+APP_SETTINGS_FILE = os.path.join(APP_DIR, "app_settings.json")
+
+
+class AppSettings:
+    """앱 설정 관리 클래스"""
+
+    def __init__(self):
+        self._settings = {
+            'start_with_windows': False,
+            'start_minimized': False,  # 기본값: 창 표시 (사용자가 설정에서 변경 가능)
+            'update_check_url': 'https://tubiq.net/qfred/version.json',
+            'last_update_check': None,
+        }
+        self.load()
+
+    def load(self):
+        """설정 파일 로드"""
+        if os.path.exists(APP_SETTINGS_FILE):
+            try:
+                with open(APP_SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                    saved = json.load(f)
+                    self._settings.update(saved)
+            except:
+                pass
+
+    def save(self):
+        """설정 파일 저장"""
+        with open(APP_SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(self._settings, f, ensure_ascii=False, indent=2)
+
+    @property
+    def start_with_windows(self) -> bool:
+        return self._settings.get('start_with_windows', False)
+
+    @start_with_windows.setter
+    def start_with_windows(self, value: bool):
+        self._settings['start_with_windows'] = value
+        self.save()
+        self._update_startup_registry(value)
+
+    @property
+    def start_minimized(self) -> bool:
+        return self._settings.get('start_minimized', True)
+
+    @start_minimized.setter
+    def start_minimized(self, value: bool):
+        self._settings['start_minimized'] = value
+        self.save()
+
+    @property
+    def update_check_url(self) -> str:
+        return self._settings.get('update_check_url', '')
+
+    @update_check_url.setter
+    def update_check_url(self, value: str):
+        self._settings['update_check_url'] = value
+        self.save()
+
+    def _update_startup_registry(self, enable: bool):
+        """Windows 시작 프로그램 레지스트리 등록/해제"""
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
+            if enable:
+                # exe 경로 가져오기
+                if getattr(sys, 'frozen', False):
+                    exe_path = sys.executable
+                else:
+                    exe_path = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+                winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, exe_path)
+                print(f"[AppSettings] 시작 프로그램 등록: {exe_path}")
+            else:
+                try:
+                    winreg.DeleteValue(key, APP_NAME)
+                    print("[AppSettings] 시작 프로그램 해제")
+                except FileNotFoundError:
+                    pass
+            winreg.CloseKey(key)
+        except Exception as e:
+            print(f"[AppSettings] 레지스트리 오류: {e}")
+
+    def is_registered_startup(self) -> bool:
+        """시작 프로그램에 등록되어 있는지 확인"""
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ)
+            try:
+                winreg.QueryValueEx(key, APP_NAME)
+                winreg.CloseKey(key)
+                return True
+            except FileNotFoundError:
+                winreg.CloseKey(key)
+                return False
+        except:
+            return False
+
+
+def check_for_updates(update_url: str) -> tuple[bool, str, str]:
+    """
+    업데이트 확인
+    Returns: (업데이트 있음 여부, 최신 버전, 다운로드 URL)
+    """
+    if not update_url:
+        return False, "", ""
+
+    try:
+        req = urllib.request.Request(update_url, headers={'User-Agent': 'Q-fred Update Checker'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            latest_version = data.get('version', '')
+            download_url = data.get('download_url', '')
+
+            if latest_version and latest_version != APP_VERSION:
+                # 버전 비교 (간단한 문자열 비교)
+                if latest_version > APP_VERSION:
+                    return True, latest_version, download_url
+
+        return False, APP_VERSION, ""
+    except Exception as e:
+        print(f"[UpdateChecker] 오류: {e}")
+        return False, "", ""
+
 
 # 한글 -> QWERTY 매핑
 KOREAN_TO_QWERTY = {
@@ -147,8 +288,9 @@ def convert_to_korean(qwerty: str) -> str:
 class SnippetManager:
     """스니펫 데이터 관리"""
 
-    def __init__(self):
+    def __init__(self, google_sync=None):
         self.snippets = []
+        self.google_sync = google_sync
         self.load()
 
     def load(self):
@@ -181,6 +323,10 @@ class SnippetManager:
     def save(self):
         with open(SNIPPETS_FILE, 'w', encoding='utf-8') as f:
             json.dump(self.snippets, f, ensure_ascii=False, indent=2)
+
+        # Google Sheets 자동 동기화
+        if self.google_sync and self.google_sync.auto_sync_enabled:
+            self.google_sync.sync_snippets(self.snippets)
 
     def add(self, trigger: str, content: str):
         snippet = {
@@ -494,14 +640,16 @@ class SnippetCard(QFrame):
 class QfredApp(QMainWindow):
     """메인 GUI 애플리케이션"""
 
-    def __init__(self, manager: SnippetManager, engine: SnippetEngine):
+    def __init__(self, manager: SnippetManager, engine: SnippetEngine, google_sync=None, app_settings=None):
         super().__init__()
         self.manager = manager
         self.engine = engine
+        self.google_sync = google_sync
+        self.app_settings = app_settings or AppSettings()
         self.selected_id = None
         self.current_tab = "snippets"
 
-        self.setWindowTitle("Qfred - Smart Snippet Manager")
+        self.setWindowTitle("Q-fred - Smart Snippet Manager")
         self.setMinimumSize(900, 550)
         self.resize(950, 600)
 
@@ -536,10 +684,39 @@ class QfredApp(QMainWindow):
         sidebar_layout.setContentsMargins(16, 20, 16, 16)
         sidebar_layout.setSpacing(14)
 
-        # 타이틀
-        title = QLabel("Qfred")
+        # 타이틀 + 설정 버튼
+        title_frame = QFrame()
+        title_frame.setStyleSheet("QFrame { background: transparent; border: none; }")
+        title_layout = QHBoxLayout(title_frame)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+
+        title = QLabel("Q-fred")
         title.setStyleSheet("font-size: 20px; font-weight: bold; color: #ffffff;")
-        sidebar_layout.addWidget(title)
+        title_layout.addWidget(title)
+
+        title_layout.addStretch()
+
+        # 설정 버튼
+        self.settings_btn = QPushButton("⚙")
+        self.settings_btn.setFixedSize(32, 32)
+        self.settings_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                color: #94a3b8;
+                font-size: 18px;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: #334155;
+                color: #ffffff;
+            }
+        """)
+        self.settings_btn.clicked.connect(self.open_settings)
+        title_layout.addWidget(self.settings_btn)
+
+        sidebar_layout.addWidget(title_frame)
 
         # 탭 버튼 (Snippets / Test)
         tab_frame = QFrame()
@@ -1087,7 +1264,7 @@ class QfredApp(QMainWindow):
 
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.activated.connect(self.on_tray_activated)
-        self.tray_icon.setToolTip("Qfred - 단축어 관리자")
+        self.tray_icon.setToolTip("Q-fred - 단축어 관리자")
         self.tray_icon.show()
 
     def on_tray_activated(self, reason):
@@ -1114,6 +1291,22 @@ class QfredApp(QMainWindow):
         self.engine.stop()
         self.tray_icon.hide()
         QApplication.quit()
+
+    def show_update_notification(self, latest_ver: str, download_url: str):
+        """업데이트 알림 표시 (메인 스레드에서 호출되어야 함)"""
+        # QTimer를 사용해 메인 스레드에서 실행
+        QTimer.singleShot(0, lambda: self._show_update_dialog(latest_ver, download_url))
+
+    def _show_update_dialog(self, latest_ver: str, download_url: str):
+        """업데이트 다이얼로그 표시"""
+        reply = QMessageBox.question(
+            self, '업데이트 가능',
+            f"Q-fred 새 버전 {latest_ver}이(가) 있습니다.\n현재 버전: {APP_VERSION}\n\n다운로드 페이지를 여시겠습니까?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes and download_url:
+            import webbrowser
+            webbrowser.open(download_url)
 
     def load_snippets_list(self, filter_text=""):
         """스니펫 리스트 로드"""
@@ -1229,6 +1422,323 @@ class QfredApp(QMainWindow):
             else:
                 self.load_snippets_list()
 
+    def open_settings(self):
+        """설정 창 열기"""
+        dialog = SettingsDialog(self.google_sync, self.app_settings, self)
+        dialog.exec()
+
+
+class SettingsDialog(QDialog):
+    """설정 다이얼로그 (앱 설정 + Google Sheets 연동)"""
+
+    def __init__(self, google_sync, app_settings, parent=None):
+        super().__init__(parent)
+        self.google_sync = google_sync
+        self.app_settings = app_settings
+        self.setWindowTitle("설정")
+        self.setFixedSize(550, 780)
+        self.setStyleSheet("""
+            QDialog { background-color: #0f172a; }
+            QLabel { color: #e2e8f0; }
+            QLineEdit {
+                background-color: #1e293b;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 8px 12px;
+                color: #ffffff;
+                font-size: 13px;
+                min-height: 20px;
+            }
+            QLineEdit:focus { border-color: #4a946c; }
+            QPushButton {
+                background-color: #334155;
+                border: none;
+                border-radius: 6px;
+                padding: 10px 20px;
+                color: #ffffff;
+                font-size: 13px;
+                min-height: 20px;
+            }
+            QPushButton:hover { background-color: #475569; }
+            QCheckBox { color: #e2e8f0; font-size: 13px; min-height: 24px; }
+            QCheckBox::indicator {
+                width: 18px; height: 18px;
+                border-radius: 4px;
+                border: 1px solid #475569;
+                background-color: #1e293b;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #4a946c;
+                border-color: #4a946c;
+            }
+        """)
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 28, 28, 28)
+        layout.setSpacing(8)
+
+        # ===== 일반 설정 섹션 =====
+        general_title = QLabel("일반 설정")
+        general_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffffff;")
+        layout.addWidget(general_title)
+        layout.addSpacing(4)
+
+        # 버전 정보
+        version_label = QLabel(f"버전: {APP_VERSION}")
+        version_label.setStyleSheet("color: #64748b; font-size: 11px;")
+        layout.addWidget(version_label)
+        layout.addSpacing(8)
+
+        # 시작 시 자동 실행
+        self.startup_check = QCheckBox("Windows 시작 시 자동 실행")
+        self.startup_check.setChecked(self.app_settings.is_registered_startup())
+        layout.addWidget(self.startup_check)
+        layout.addSpacing(4)
+
+        # 시작 시 창 숨김
+        self.minimized_check = QCheckBox("시작 시 트레이로 실행 (창 숨김)")
+        self.minimized_check.setChecked(self.app_settings.start_minimized)
+        layout.addWidget(self.minimized_check)
+        layout.addSpacing(16)
+
+        # 구분선
+        line1 = QFrame()
+        line1.setFrameShape(QFrame.Shape.HLine)
+        line1.setStyleSheet("background-color: #334155;")
+        line1.setFixedHeight(1)
+        layout.addWidget(line1)
+        layout.addSpacing(16)
+
+        # ===== Google Sheets 섹션 =====
+        google_title = QLabel("Google Sheets 연동")
+        google_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffffff;")
+        layout.addWidget(google_title)
+        layout.addSpacing(8)
+
+        # 서비스 계정 JSON 파일
+        json_label = QLabel("서비스 계정 JSON 파일")
+        json_label.setStyleSheet("font-size: 12px; color: #94a3b8;")
+        layout.addWidget(json_label)
+        layout.addSpacing(4)
+
+        json_frame = QFrame()
+        json_frame.setStyleSheet("QFrame { background: transparent; }")
+        json_layout = QHBoxLayout(json_frame)
+        json_layout.setContentsMargins(0, 0, 0, 0)
+        json_layout.setSpacing(8)
+
+        self.json_path_input = QLineEdit()
+        self.json_path_input.setPlaceholderText("JSON 키 파일 경로...")
+        self.json_path_input.setText(self.google_sync.service_account_file if self.google_sync else "")
+        self.json_path_input.setFixedHeight(38)
+        json_layout.addWidget(self.json_path_input)
+
+        browse_btn = QPushButton("찾아보기")
+        browse_btn.setFixedSize(100, 38)
+        browse_btn.clicked.connect(self.browse_json_file)
+        json_layout.addWidget(browse_btn)
+        layout.addWidget(json_frame)
+
+        # 서비스 계정 이메일 표시
+        self.email_label = QLabel("")
+        self.email_label.setStyleSheet("color: #6ee7b7; font-size: 11px;")
+        layout.addWidget(self.email_label)
+        self.update_email_label()
+        layout.addSpacing(12)
+
+        # 스프레드시트 ID
+        sheet_label = QLabel("스프레드시트 ID")
+        sheet_label.setStyleSheet("font-size: 12px; color: #94a3b8;")
+        layout.addWidget(sheet_label)
+        layout.addSpacing(4)
+
+        self.sheet_id_input = QLineEdit()
+        self.sheet_id_input.setPlaceholderText("스프레드시트 URL에서 /d/ 뒤의 ID를 복사")
+        self.sheet_id_input.setText(self.google_sync.spreadsheet_id if self.google_sync else "")
+        self.sheet_id_input.setFixedHeight(38)
+        layout.addWidget(self.sheet_id_input)
+        layout.addSpacing(8)
+
+        # 자동 동기화 체크박스
+        self.auto_sync_check = QCheckBox("저장 시 자동 동기화")
+        self.auto_sync_check.setChecked(self.google_sync.auto_sync_enabled if self.google_sync else False)
+        layout.addWidget(self.auto_sync_check)
+        layout.addSpacing(8)
+
+        # 연결 테스트 버튼
+        self.test_btn = QPushButton("연결 테스트")
+        self.test_btn.setFixedSize(120, 38)
+        self.test_btn.clicked.connect(self.test_connection)
+        layout.addWidget(self.test_btn)
+
+        # 상태 라벨
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("font-size: 12px;")
+        layout.addWidget(self.status_label)
+        layout.addSpacing(16)
+
+        # 구분선
+        line2 = QFrame()
+        line2.setFrameShape(QFrame.Shape.HLine)
+        line2.setStyleSheet("background-color: #334155;")
+        line2.setFixedHeight(1)
+        layout.addWidget(line2)
+        layout.addSpacing(16)
+
+        # ===== 업데이트 섹션 =====
+        update_title = QLabel("업데이트")
+        update_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffffff;")
+        layout.addWidget(update_title)
+        layout.addSpacing(8)
+
+        update_url_label = QLabel("업데이트 체크 URL")
+        update_url_label.setStyleSheet("font-size: 12px; color: #94a3b8;")
+        layout.addWidget(update_url_label)
+        layout.addSpacing(4)
+
+        self.update_url_input = QLineEdit()
+        self.update_url_input.setPlaceholderText("https://example.com/version.json")
+        self.update_url_input.setText(self.app_settings.update_check_url)
+        self.update_url_input.setFixedHeight(38)
+        layout.addWidget(self.update_url_input)
+        layout.addSpacing(8)
+
+        # 업데이트 체크 버튼
+        self.update_check_btn = QPushButton("지금 업데이트 확인")
+        self.update_check_btn.setFixedSize(150, 38)
+        self.update_check_btn.clicked.connect(self.check_update_now)
+        layout.addWidget(self.update_check_btn)
+
+        self.update_status_label = QLabel("")
+        self.update_status_label.setStyleSheet("font-size: 12px;")
+        layout.addWidget(self.update_status_label)
+
+        layout.addStretch()
+        layout.addSpacing(16)
+
+        # ===== 버튼 영역 =====
+        btn_frame = QFrame()
+        btn_frame.setStyleSheet("QFrame { background: transparent; }")
+        btn_layout = QHBoxLayout(btn_frame)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(12)
+
+        btn_layout.addStretch()
+
+        save_btn = QPushButton("저장")
+        save_btn.setFixedSize(100, 40)
+        save_btn.setStyleSheet("""
+            QPushButton { background-color: #4a946c; font-weight: bold; min-height: 20px; }
+            QPushButton:hover { background-color: #5db684; }
+        """)
+        save_btn.clicked.connect(self.save_settings)
+        btn_layout.addWidget(save_btn)
+
+        cancel_btn = QPushButton("취소")
+        cancel_btn.setFixedSize(100, 40)
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+
+        layout.addWidget(btn_frame)
+
+    def browse_json_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "서비스 계정 JSON 파일 선택", "", "JSON Files (*.json)")
+        if file_path:
+            self.json_path_input.setText(file_path)
+            self.update_email_label()
+
+    def update_email_label(self):
+        json_path = self.json_path_input.text()
+        if json_path and os.path.exists(json_path):
+            try:
+                with open(json_path, 'r') as f:
+                    data = json.load(f)
+                    email = data.get('client_email', '')
+                    if email:
+                        self.email_label.setText(f"서비스 계정: {email}")
+                        self.email_label.setStyleSheet("color: #6ee7b7; font-size: 11px;")
+                    else:
+                        self.email_label.setText("유효하지 않은 서비스 계정 파일입니다.")
+                        self.email_label.setStyleSheet("color: #fb7185; font-size: 11px;")
+            except:
+                self.email_label.setText("JSON 파일을 읽을 수 없습니다.")
+                self.email_label.setStyleSheet("color: #fb7185; font-size: 11px;")
+        else:
+            self.email_label.setText("")
+
+    def test_connection(self):
+        if not self.google_sync:
+            self.status_label.setText("Google Sheets 모듈을 사용할 수 없습니다.")
+            self.status_label.setStyleSheet("color: #fb7185; font-size: 12px;")
+            return
+
+        self.google_sync.service_account_file = self.json_path_input.text()
+        self.google_sync.spreadsheet_id = self.sheet_id_input.text()
+
+        self.status_label.setText("연결 테스트 중...")
+        self.status_label.setStyleSheet("color: #fbbf24; font-size: 12px;")
+        self.test_btn.setEnabled(False)
+        QApplication.processEvents()
+
+        success, message = self.google_sync.test_connection()
+        if success:
+            self.status_label.setText(f"✓ {message}")
+            self.status_label.setStyleSheet("color: #6ee7b7; font-size: 12px;")
+        else:
+            self.status_label.setText(f"✗ {message}")
+            self.status_label.setStyleSheet("color: #fb7185; font-size: 12px;")
+        self.test_btn.setEnabled(True)
+
+    def check_update_now(self):
+        url = self.update_url_input.text()
+        if not url:
+            self.update_status_label.setText("업데이트 URL을 입력해주세요.")
+            self.update_status_label.setStyleSheet("color: #fb7185; font-size: 12px;")
+            return
+
+        self.update_status_label.setText("업데이트 확인 중...")
+        self.update_status_label.setStyleSheet("color: #fbbf24; font-size: 12px;")
+        self.update_check_btn.setEnabled(False)
+        QApplication.processEvents()
+
+        has_update, latest_ver, download_url = check_for_updates(url)
+
+        if has_update:
+            self.update_status_label.setText(f"새 버전 {latest_ver} 사용 가능!")
+            self.update_status_label.setStyleSheet("color: #6ee7b7; font-size: 12px;")
+            reply = QMessageBox.question(
+                self, '업데이트 가능',
+                f"새 버전 {latest_ver}이(가) 있습니다.\n\n다운로드 페이지를 여시겠습니까?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes and download_url:
+                import webbrowser
+                webbrowser.open(download_url)
+        elif latest_ver:
+            self.update_status_label.setText(f"✓ 최신 버전입니다 (v{APP_VERSION})")
+            self.update_status_label.setStyleSheet("color: #6ee7b7; font-size: 12px;")
+        else:
+            self.update_status_label.setText("업데이트 확인 실패")
+            self.update_status_label.setStyleSheet("color: #fb7185; font-size: 12px;")
+
+        self.update_check_btn.setEnabled(True)
+
+    def save_settings(self):
+        # 앱 설정 저장
+        self.app_settings.start_with_windows = self.startup_check.isChecked()
+        self.app_settings.start_minimized = self.minimized_check.isChecked()
+        self.app_settings.update_check_url = self.update_url_input.text()
+
+        # Google Sheets 설정 저장
+        if self.google_sync:
+            self.google_sync.service_account_file = self.json_path_input.text()
+            self.google_sync.spreadsheet_id = self.sheet_id_input.text()
+            self.google_sync.auto_sync_enabled = self.auto_sync_check.isChecked()
+
+        self.accept()
+
 
 def main():
     # 중복 실행 방지
@@ -1242,21 +1752,46 @@ def main():
         msvcrt.locking(lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
     except:
         # 이미 실행 중
-        print("Qfred is already running.")
+        print("Q-fred is already running.")
         sys.exit(0)
 
     app = QApplication(sys.argv)
 
+    # 앱 설정 초기화
+    app_settings = AppSettings()
+
+    # Google Sheets 동기화 초기화
+    google_sync = None
+    if GOOGLE_SHEETS_AVAILABLE:
+        google_sync = GoogleSheetsSync(APP_DIR)
+
     # 매니저 및 엔진 초기화
-    manager = SnippetManager()
+    manager = SnippetManager(google_sync=google_sync)
     engine = SnippetEngine(manager)
 
-    # GUI 생성 (창이 열린 상태에서는 훅 비활성화)
-    window = QfredApp(manager, engine)
-    window.show()
+    # GUI 생성
+    window = QfredApp(manager, engine, google_sync=google_sync, app_settings=app_settings)
 
-    # 엔진 시작 (창이 열려있어도 동작)
+    # 트레이 모드: 설정에 따라 창 표시 여부 결정
+    if app_settings.start_minimized:
+        # 트레이로만 시작 (창 숨김)
+        window.hide()
+    else:
+        window.show()
+
+    # 엔진 시작 (창이 숨겨져 있어도 동작)
     engine.start()
+
+    # 백그라운드에서 업데이트 체크
+    def check_update_background():
+        if app_settings.update_check_url:
+            has_update, latest_ver, download_url = check_for_updates(app_settings.update_check_url)
+            if has_update:
+                # 메인 스레드에서 알림 표시
+                window.show_update_notification(latest_ver, download_url)
+
+    update_thread = threading.Thread(target=check_update_background, daemon=True)
+    update_thread.start()
 
     sys.exit(app.exec())
 
