@@ -102,25 +102,72 @@ def send_paste():
     )
     ctypes.windll.user32.SendInput(4, arr, ctypes.sizeof(INPUT))
 
+KEYEVENTF_EXTENDEDKEY = 0x0001
+
 def send_paste_shift_insert():
-    """Shift+Insert로 붙여넣기 (콘솔용)"""
+    """Shift+Insert로 붙여넣기 (콘솔용, Insert에 EXTENDEDKEY 플래그 포함)"""
     arr = (INPUT * 4)(
         _make_input(VK_SHIFT),
-        _make_input(VK_INSERT),
-        _make_input(VK_INSERT, KEYEVENTF_KEYUP),
+        _make_input(VK_INSERT, KEYEVENTF_EXTENDEDKEY),
+        _make_input(VK_INSERT, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP),
         _make_input(VK_SHIFT, KEYEVENTF_KEYUP),
     )
     ctypes.windll.user32.SendInput(4, arr, ctypes.sizeof(INPUT))
 
 def is_console_window():
-    """포그라운드 윈도우가 콘솔/터미널인지 감지"""
+    """포그라운드 윈도우가 콘솔/터미널인지 감지 (클래스명 + 프로세스명)"""
     hwnd = ctypes.windll.user32.GetForegroundWindow()
+
+    # 1차: 윈도우 클래스명 체크
     class_name = ctypes.create_unicode_buffer(256)
     ctypes.windll.user32.GetClassNameW(hwnd, class_name, 256)
     name = class_name.value.lower()
-    return ('console' in name or 'terminal' in name
+    _debug_console_info(name, "")  # 디버그
+    if ('console' in name or 'terminal' in name
             or 'cascadia' in name or 'mintty' in name
-            or 'cmd' in name or 'powershell' in name)
+            or 'cmd' in name or 'powershell' in name):
+        return True
+
+    # 2차: 프로세스명 체크 (Windows Terminal 등 WinUI3 기반)
+    try:
+        pid = ctypes.wintypes.DWORD()
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+        if handle:
+            exe_buf = ctypes.create_unicode_buffer(260)
+            size = ctypes.wintypes.DWORD(260)
+            ctypes.windll.kernel32.QueryFullProcessImageNameW(
+                handle, 0, exe_buf, ctypes.byref(size))
+            ctypes.windll.kernel32.CloseHandle(handle)
+            proc = os.path.basename(exe_buf.value).lower()
+            _debug_console_info(name, proc)  # 디버그
+            if proc in ('windowsterminal.exe', 'cmd.exe', 'powershell.exe',
+                        'pwsh.exe', 'conhost.exe', 'bash.exe', 'wsl.exe',
+                        'mintty.exe', 'alacritty.exe', 'wezterm-gui.exe',
+                        'hyper.exe', 'code.exe', 'antigravity.exe'):
+                return True
+    except:
+        pass
+
+    return False
+
+def _debug_console_info(class_name, proc_name):
+    """콘솔 감지 디버그 로그"""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '_debug.txt'), 'a', encoding='utf-8') as f:
+            f.write(f"CONSOLE_DETECT: class='{class_name}', proc='{proc_name}'\n")
+    except:
+        pass
+
+
+# IMM32 for IME control (트리거 입력 필드 한/영 전환)
+try:
+    ctypes.windll.imm32.ImmAssociateContext.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    ctypes.windll.imm32.ImmAssociateContext.restype = ctypes.c_void_p
+except:
+    pass
 
 def send_unicode_string(text):
     """SendInput + KEYEVENTF_UNICODE로 문자열 원자적 전송 (클립보드 불필요, 한번에 출력)"""
@@ -400,21 +447,24 @@ SCANCODE_TO_QWERTY = {
     41: '`', 43: '\\',
 }
 
-# Virtual Key Code -> QWERTY 키 매핑 (pynput용)
-VK_TO_QWERTY = {
+# Virtual Key Code → (normal, shifted) 매핑 (Shift 인식, 범용 트리거용)
+VK_TO_CHAR = {
     # 숫자 키 (상단)
-    0x30: '0', 0x31: '1', 0x32: '2', 0x33: '3', 0x34: '4',
-    0x35: '5', 0x36: '6', 0x37: '7', 0x38: '8', 0x39: '9',
+    0x30: ('0', ')'), 0x31: ('1', '!'), 0x32: ('2', '@'), 0x33: ('3', '#'),
+    0x34: ('4', '$'), 0x35: ('5', '%'), 0x36: ('6', '^'), 0x37: ('7', '&'),
+    0x38: ('8', '*'), 0x39: ('9', '('),
     # 알파벳 키 (A-Z는 0x41-0x5A)
-    0x41: 'a', 0x42: 'b', 0x43: 'c', 0x44: 'd', 0x45: 'e',
-    0x46: 'f', 0x47: 'g', 0x48: 'h', 0x49: 'i', 0x4A: 'j',
-    0x4B: 'k', 0x4C: 'l', 0x4D: 'm', 0x4E: 'n', 0x4F: 'o',
-    0x50: 'p', 0x51: 'q', 0x52: 'r', 0x53: 's', 0x54: 't',
-    0x55: 'u', 0x56: 'v', 0x57: 'w', 0x58: 'x', 0x59: 'y', 0x5A: 'z',
+    0x41: ('a', 'A'), 0x42: ('b', 'B'), 0x43: ('c', 'C'), 0x44: ('d', 'D'),
+    0x45: ('e', 'E'), 0x46: ('f', 'F'), 0x47: ('g', 'G'), 0x48: ('h', 'H'),
+    0x49: ('i', 'I'), 0x4A: ('j', 'J'), 0x4B: ('k', 'K'), 0x4C: ('l', 'L'),
+    0x4D: ('m', 'M'), 0x4E: ('n', 'N'), 0x4F: ('o', 'O'), 0x50: ('p', 'P'),
+    0x51: ('q', 'Q'), 0x52: ('r', 'R'), 0x53: ('s', 'S'), 0x54: ('t', 'T'),
+    0x55: ('u', 'U'), 0x56: ('v', 'V'), 0x57: ('w', 'W'), 0x58: ('x', 'X'),
+    0x59: ('y', 'Y'), 0x5A: ('z', 'Z'),
     # 기호 키
-    0xBD: '-', 0xBB: '=', 0xDB: '[', 0xDD: ']', 0xDC: '\\',
-    0xBA: ';', 0xDE: "'", 0xBC: ',', 0xBE: '.', 0xBF: '/',
-    0xC0: '`',
+    0xBD: ('-', '_'), 0xBB: ('=', '+'), 0xDB: ('[', '{'), 0xDD: (']', '}'),
+    0xDC: ('\\', '|'), 0xBA: (';', ':'), 0xDE: ("'", '"'), 0xBC: (',', '<'),
+    0xBE: ('.', '>'), 0xBF: ('/', '?'), 0xC0: ('`', '~'),
 }
 
 # Unicode 자모 매핑
@@ -434,6 +484,14 @@ UNICODE_JAMO = {
     '\u11B7': 'a', '\u11B8': 'q', '\u11B9': 'qt', '\u11BA': 't', '\u11BB': 'T',
     '\u11BC': 'd', '\u11BD': 'w', '\u11BE': 'c', '\u11BF': 'z', '\u11C0': 'x',
     '\u11C1': 'v', '\u11C2': 'g'
+}
+
+# 겹받침 쌍 (한글 IME가 자동으로 합치는 자음 조합)
+GYEOP_BATCHIM_PAIRS = {
+    ('ㄱ', 'ㅅ'), ('ㄴ', 'ㅈ'), ('ㄴ', 'ㅎ'),
+    ('ㄹ', 'ㄱ'), ('ㄹ', 'ㅁ'), ('ㄹ', 'ㅂ'), ('ㄹ', 'ㅅ'),
+    ('ㄹ', 'ㅌ'), ('ㄹ', 'ㅍ'), ('ㄹ', 'ㅎ'),
+    ('ㅂ', 'ㅅ'),
 }
 
 # QWERTY -> 한글 자모
@@ -478,6 +536,53 @@ def convert_to_korean(qwerty: str) -> str:
         else:
             result += char
     return result
+
+
+def calc_visual_len(qwerty_trigger: str) -> int:
+    """QWERTY 트리거의 화면 표시 글자수 계산 (한글 겹받침 고려)
+    예: 'rt'(ㄱㅅ) → IME가 ㄳ으로 합침 → 1글자, 'dx'(ㅇㅌ) → 합칠 수 없음 → 2글자
+    """
+    korean = convert_to_korean(qwerty_trigger)
+    count = 0
+    i = 0
+    while i < len(korean):
+        if i + 1 < len(korean) and (korean[i], korean[i + 1]) in GYEOP_BATCHIM_PAIRS:
+            count += 1
+            i += 2
+        else:
+            count += 1
+            i += 1
+    return count
+
+
+class TriggerLineEdit(QLineEdit):
+    """영문 모드에서 IME를 우회하여 영문/특수문자를 직접 입력하는 트리거 필드"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.english_mode = False
+
+    def set_english_mode(self, english: bool):
+        self.english_mode = english
+        self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, not english)
+
+    def keyPressEvent(self, event):
+        if self.english_mode:
+            # Ctrl/Alt 조합은 기본 동작 유지 (Ctrl+A, Ctrl+C 등)
+            if not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+                vk = event.nativeVirtualKey()
+                if vk and vk in VK_TO_CHAR:
+                    normal, shifted = VK_TO_CHAR[vk]
+                    char = shifted if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else normal
+                    self.insert(char)
+                    return
+        super().keyPressEvent(event)
+
+    def inputMethodEvent(self, event):
+        if self.english_mode:
+            event.ignore()
+            return
+        super().inputMethodEvent(event)
 
 
 class SnippetManager:
@@ -569,6 +674,7 @@ class SnippetEngine(QObject):
         self.keyboard_controller = Controller()
         self.ctrl_pressed = False
         self.alt_pressed = False
+        self.shift_pressed = False
         self.refresh_triggers()
 
     def refresh_triggers(self):
@@ -590,6 +696,9 @@ class SnippetEngine(QObject):
             return
         if key == Key.alt_l or key == Key.alt_r or key == Key.alt_gr:
             self.alt_pressed = True
+            return
+        if key in (Key.shift, Key.shift_l, Key.shift_r):
+            self.shift_pressed = True
             return
         if key == Key.cmd:
             self.buffer = ""
@@ -624,10 +733,11 @@ class SnippetEngine(QObject):
             self.buffer = ""
             return
 
-        # 일반 문자 키 처리 (VK 코드 기반)
+        # 일반 문자 키 처리 (VK 코드 기반, Shift 인식)
         try:
-            if vk and vk in VK_TO_QWERTY:
-                char = VK_TO_QWERTY[vk]
+            if vk and vk in VK_TO_CHAR:
+                normal, shifted = VK_TO_CHAR[vk]
+                char = shifted if self.shift_pressed else normal
                 self.buffer += char
                 if len(self.buffer) > self.max_trigger_len + 5:
                     self.buffer = self.buffer[-(self.max_trigger_len + 5):]
@@ -642,6 +752,8 @@ class SnippetEngine(QObject):
             self.ctrl_pressed = False
         if key == Key.alt_l or key == Key.alt_r or key == Key.alt_gr:
             self.alt_pressed = False
+        if key in (Key.shift, Key.shift_l, Key.shift_r):
+            self.shift_pressed = False
 
     def _check_triggers_snapshot(self, snapshot: str) -> bool:
         """스냅샷 기반 트리거 체크 (self.buffer 건드리지 않음)"""
@@ -652,12 +764,20 @@ class SnippetEngine(QObject):
         # 디바운스: 마지막 치환 후 300ms 이내 재발동 방지
         if elapsed < 0.3:
             return False
+        # 최장 매칭: 여러 트리거가 매칭되면 가장 긴 것 우선
+        best_trigger = None
+        best_content = None
+        best_len = 0
         for trigger, content in self.trigger_map.items():
-            if snapshot.endswith(trigger):
-                self.is_replacing = True
-                self.buffer = ""
-                threading.Thread(target=self._replace, args=(trigger, content), daemon=True).start()
-                return True
+            if snapshot.endswith(trigger) and len(trigger) > best_len:
+                best_trigger = trigger
+                best_content = content
+                best_len = len(trigger)
+        if best_trigger:
+            self.is_replacing = True
+            self.buffer = ""
+            threading.Thread(target=self._replace, args=(best_trigger, best_content), daemon=True).start()
+            return True
         return False
 
     def _replace(self, trigger: str, content: str):
@@ -670,8 +790,8 @@ class SnippetEngine(QObject):
                 self.listener = None
             time.sleep(0.05)
 
-            # ctypes SendInput으로 백스페이스
-            backspace_count = len(trigger) + 1
+            # ctypes SendInput으로 백스페이스 (겹받침은 2키→1글자이므로 화면 글자수 기준)
+            backspace_count = calc_visual_len(trigger) + 1
             send_backspaces(backspace_count)
             time.sleep(0.05)
 
@@ -679,19 +799,9 @@ class SnippetEngine(QObject):
             console = is_console_window()
 
             if console:
-                # 콘솔: 항상 클립보드 + Shift+Insert
-                try:
-                    old_clipboard = pyperclip.paste()
-                except:
-                    old_clipboard = ""
-                pyperclip.copy(content)
-                time.sleep(0.05)
-                send_paste_shift_insert()
-                time.sleep(0.2)
-                try:
-                    pyperclip.copy(old_clipboard)
-                except:
-                    pass
+                # 콘솔/터미널: UNICODE 직접 입력 (Ctrl+V는 터미널+셸 양쪽에서 중복 처리됨)
+                send_unicode_string(content)
+                time.sleep(0.1)
             elif len(content) <= 50:
                 # GUI 짧은 텍스트: UNICODE 직접 입력
                 send_unicode_string(content)
@@ -716,6 +826,7 @@ class SnippetEngine(QObject):
             self.buffer = ""
             self.ctrl_pressed = False
             self.alt_pressed = False
+            self.shift_pressed = False
             self._last_replace_time = time.monotonic()
             self.is_replacing = False
             # 리스너 재시작
@@ -881,7 +992,6 @@ class QfredApp(QMainWindow):
         self.app_settings = app_settings or AppSettings()
         self.selected_id = None
         self.current_tab = "snippets"
-
         self.setWindowTitle("Q-fred - Smart Snippet Manager")
         self.setMinimumSize(900, 550)
         self.resize(950, 600)
@@ -1138,7 +1248,7 @@ class QfredApp(QMainWindow):
         trigger_layout.setContentsMargins(0, 0, 12, 0)
 
         self.trigger_input = QLineEdit()
-        self.trigger_input.setPlaceholderText("e.g. rt")
+        self.trigger_input.setPlaceholderText("예: ㄱㅅ, addr, :sig")
         self.trigger_input.setStyleSheet("""
             QLineEdit {
                 background-color: transparent;
@@ -1165,7 +1275,7 @@ class QfredApp(QMainWindow):
         layout.addWidget(trigger_container)
 
         # 트리거 도움말
-        help_label = QLabel("한글 또는 영문으로 입력")
+        help_label = QLabel("한글 자모, 영문, 특수문자 모두 사용 가능")
         help_label.setStyleSheet("color: #64748b; font-size: 11px;")
         layout.addWidget(help_label)
 
@@ -1631,14 +1741,13 @@ class QfredApp(QMainWindow):
         if not trigger_input or not content:
             return
 
-        # 한글 입력 처리
+        # 자동 감지: 한글 포함 → 한글 트리거, 그 외 → 그대로 저장
         has_korean = any('\uAC00' <= c <= '\uD7A3' or '\u3131' <= c <= '\u3163' for c in trigger_input)
-
         if has_korean:
             qwerty_converted = convert_to_qwerty(trigger_input)
             trigger = convert_to_korean(qwerty_converted)
         else:
-            trigger = convert_to_korean(trigger_input)
+            trigger = trigger_input
 
         if self.selected_id:
             self.manager.update(self.selected_id, trigger, content)
