@@ -12,7 +12,6 @@ import pyperclip
 import uuid
 import ctypes
 import winreg
-import urllib.request
 from datetime import datetime
 from pynput import keyboard as pynput_keyboard
 from pynput.keyboard import Key, Controller
@@ -40,22 +39,15 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QObject, QTimer, QEvent
 from PyQt6.QtGui import QIcon, QPixmap, QFont, QColor, QPalette, QAction, QFontDatabase, QCursor
 
-# Google Sheets 동기화 모듈
-try:
-    from google_sheets_sync import GoogleSheetsSync
-    GOOGLE_SHEETS_AVAILABLE = True
-except ImportError:
-    GOOGLE_SHEETS_AVAILABLE = False
-
 # 설정 파일 경로
 # PyInstaller exe로 실행 시 exe 파일 위치, 스크립트 실행 시 스크립트 위치 사용
 if getattr(sys, 'frozen', False):
-    # exe로 빌드된 경우 - exe 파일이 있는 디렉토리
     APP_DIR = os.path.dirname(sys.executable)
 else:
-    # 스크립트로 실행되는 경우
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
-SNIPPETS_FILE = os.path.join(APP_DIR, "snippets.json")
+
+# 기본 저장 폴더: %APPDATA%\Qfred
+DEFAULT_STORAGE_FOLDER = os.path.join(os.environ.get('APPDATA', APP_DIR), 'Qfred')
 APP_SETTINGS_FILE = os.path.join(APP_DIR, "app_settings.json")
 
 
@@ -65,9 +57,8 @@ class AppSettings:
     def __init__(self):
         self._settings = {
             'start_with_windows': False,
-            'start_minimized': False,  # 기본값: 창 표시 (사용자가 설정에서 변경 가능)
-            'update_check_url': 'https://tubiq.net/qfred/version.json',
-            'last_update_check': None,
+            'start_minimized': False,
+            'storage_folder': DEFAULT_STORAGE_FOLDER,
         }
         self.load()
 
@@ -106,13 +97,20 @@ class AppSettings:
         self.save()
 
     @property
-    def update_check_url(self) -> str:
-        return self._settings.get('update_check_url', '')
+    def storage_folder(self) -> str:
+        return self._settings.get('storage_folder', DEFAULT_STORAGE_FOLDER)
 
-    @update_check_url.setter
-    def update_check_url(self, value: str):
-        self._settings['update_check_url'] = value
+    @storage_folder.setter
+    def storage_folder(self, value: str):
+        self._settings['storage_folder'] = value
         self.save()
+
+    @property
+    def snippets_file(self) -> str:
+        folder = self.storage_folder
+        os.makedirs(folder, exist_ok=True)
+        return os.path.join(folder, "snippets.json")
+
 
     def _update_startup_registry(self, enable: bool):
         """Windows 시작 프로그램 레지스트리 등록/해제"""
@@ -152,31 +150,6 @@ class AppSettings:
         except:
             return False
 
-
-def check_for_updates(update_url: str) -> tuple[bool, str, str]:
-    """
-    업데이트 확인
-    Returns: (업데이트 있음 여부, 최신 버전, 다운로드 URL)
-    """
-    if not update_url:
-        return False, "", ""
-
-    try:
-        req = urllib.request.Request(update_url, headers={'User-Agent': 'Q-fred Update Checker'})
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode('utf-8'))
-            latest_version = data.get('version', '')
-            download_url = data.get('download_url', '')
-
-            if latest_version and latest_version != APP_VERSION:
-                # 버전 비교 (간단한 문자열 비교)
-                if latest_version > APP_VERSION:
-                    return True, latest_version, download_url
-
-        return False, APP_VERSION, ""
-    except Exception as e:
-        print(f"[UpdateChecker] 오류: {e}")
-        return False, "", ""
 
 
 # 한글 -> QWERTY 매핑
@@ -288,15 +261,15 @@ def convert_to_korean(qwerty: str) -> str:
 class SnippetManager:
     """스니펫 데이터 관리"""
 
-    def __init__(self, google_sync=None):
+    def __init__(self, snippets_file: str):
         self.snippets = []
-        self.google_sync = google_sync
+        self.snippets_file = snippets_file
         self.load()
 
     def load(self):
-        if os.path.exists(SNIPPETS_FILE):
+        if os.path.exists(self.snippets_file):
             try:
-                with open(SNIPPETS_FILE, 'r', encoding='utf-8') as f:
+                with open(self.snippets_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     if isinstance(data, dict) and "snippets" in data:
                         self.snippets = []
@@ -321,12 +294,9 @@ class SnippetManager:
         ]
 
     def save(self):
-        with open(SNIPPETS_FILE, 'w', encoding='utf-8') as f:
+        os.makedirs(os.path.dirname(self.snippets_file), exist_ok=True)
+        with open(self.snippets_file, 'w', encoding='utf-8') as f:
             json.dump(self.snippets, f, ensure_ascii=False, indent=2)
-
-        # Google Sheets 자동 동기화
-        if self.google_sync and self.google_sync.auto_sync_enabled:
-            self.google_sync.sync_snippets(self.snippets)
 
     def add(self, trigger: str, content: str):
         snippet = {
@@ -640,11 +610,10 @@ class SnippetCard(QFrame):
 class QfredApp(QMainWindow):
     """메인 GUI 애플리케이션"""
 
-    def __init__(self, manager: SnippetManager, engine: SnippetEngine, google_sync=None, app_settings=None):
+    def __init__(self, manager: SnippetManager, engine: SnippetEngine, app_settings=None):
         super().__init__()
         self.manager = manager
         self.engine = engine
-        self.google_sync = google_sync
         self.app_settings = app_settings or AppSettings()
         self.selected_id = None
         self.current_tab = "snippets"
@@ -1292,21 +1261,6 @@ class QfredApp(QMainWindow):
         self.tray_icon.hide()
         QApplication.quit()
 
-    def show_update_notification(self, latest_ver: str, download_url: str):
-        """업데이트 알림 표시 (메인 스레드에서 호출되어야 함)"""
-        # QTimer를 사용해 메인 스레드에서 실행
-        QTimer.singleShot(0, lambda: self._show_update_dialog(latest_ver, download_url))
-
-    def _show_update_dialog(self, latest_ver: str, download_url: str):
-        """업데이트 다이얼로그 표시"""
-        reply = QMessageBox.question(
-            self, '업데이트 가능',
-            f"Q-fred 새 버전 {latest_ver}이(가) 있습니다.\n현재 버전: {APP_VERSION}\n\n다운로드 페이지를 여시겠습니까?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if reply == QMessageBox.StandardButton.Yes and download_url:
-            import webbrowser
-            webbrowser.open(download_url)
 
     def load_snippets_list(self, filter_text=""):
         """스니펫 리스트 로드"""
@@ -1424,19 +1378,20 @@ class QfredApp(QMainWindow):
 
     def open_settings(self):
         """설정 창 열기"""
-        dialog = SettingsDialog(self.google_sync, self.app_settings, self)
+        dialog = SettingsDialog(self.app_settings, self)
         dialog.exec()
 
 
 class SettingsDialog(QDialog):
-    """설정 다이얼로그 (앱 설정 + Google Sheets 연동)"""
+    """설정 다이얼로그 (앱 설정 + 로컬 저장 설정)"""
 
-    def __init__(self, google_sync, app_settings, parent=None):
+    def __init__(self, app_settings, parent=None):
         super().__init__(parent)
-        self.google_sync = google_sync
         self.app_settings = app_settings
         self.setWindowTitle("설정")
-        self.setFixedSize(550, 780)
+        self.setFixedSize(550, 620)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowMaximizeButtonHint)
+        self.setSizeGripEnabled(False)
         self.setStyleSheet("""
             QDialog { background-color: #0f172a; }
             QLabel { color: #e2e8f0; }
@@ -1475,7 +1430,30 @@ class SettingsDialog(QDialog):
         self.setup_ui()
 
     def setup_ui(self):
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("""
+            QScrollArea { background-color: #0f172a; border: none; }
+            QScrollBar:vertical {
+                background: transparent; width: 6px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #334155; border-radius: 3px; min-height: 20px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+        """)
+
+        content_widget = QWidget()
+        content_widget.setStyleSheet("background-color: #0f172a;")
+        scroll.setWidget(content_widget)
+        outer_layout.addWidget(scroll)
+
+        layout = QVBoxLayout(content_widget)
         layout.setContentsMargins(28, 28, 28, 28)
         layout.setSpacing(8)
 
@@ -1511,72 +1489,70 @@ class SettingsDialog(QDialog):
         layout.addWidget(line1)
         layout.addSpacing(16)
 
-        # ===== Google Sheets 섹션 =====
-        google_title = QLabel("Google Sheets 연동")
-        google_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffffff;")
-        layout.addWidget(google_title)
+        # ===== 로컬 저장 설정 섹션 =====
+        storage_title = QLabel("로컬 저장 설정")
+        storage_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffffff;")
+        layout.addWidget(storage_title)
         layout.addSpacing(8)
 
-        # 서비스 계정 JSON 파일
-        json_label = QLabel("서비스 계정 JSON 파일")
-        json_label.setStyleSheet("font-size: 12px; color: #94a3b8;")
-        layout.addWidget(json_label)
+        storage_desc = QLabel("스니펫 데이터가 저장되는 폴더를 지정합니다.")
+        storage_desc.setStyleSheet("font-size: 12px; color: #94a3b8;")
+        layout.addWidget(storage_desc)
         layout.addSpacing(4)
 
-        json_frame = QFrame()
-        json_frame.setStyleSheet("QFrame { background: transparent; }")
-        json_layout = QHBoxLayout(json_frame)
-        json_layout.setContentsMargins(0, 0, 0, 0)
-        json_layout.setSpacing(8)
+        # 저장 폴더 경로
+        folder_label = QLabel("저장 폴더")
+        folder_label.setStyleSheet("font-size: 12px; color: #94a3b8;")
+        layout.addWidget(folder_label)
+        layout.addSpacing(4)
 
-        self.json_path_input = QLineEdit()
-        self.json_path_input.setPlaceholderText("JSON 키 파일 경로...")
-        self.json_path_input.setText(self.google_sync.service_account_file if self.google_sync else "")
-        self.json_path_input.setFixedHeight(38)
-        json_layout.addWidget(self.json_path_input)
+        folder_frame = QFrame()
+        folder_frame.setStyleSheet("QFrame { background: transparent; }")
+        folder_layout = QHBoxLayout(folder_frame)
+        folder_layout.setContentsMargins(0, 0, 0, 0)
+        folder_layout.setSpacing(8)
+
+        self.folder_input = QLineEdit()
+        self.folder_input.setPlaceholderText("스니펫 저장 폴더 경로...")
+        self.folder_input.setText(self.app_settings.storage_folder)
+        self.folder_input.setFixedHeight(38)
+        self.folder_input.setReadOnly(True)
+        folder_layout.addWidget(self.folder_input)
 
         browse_btn = QPushButton("찾아보기")
         browse_btn.setFixedSize(100, 38)
-        browse_btn.clicked.connect(self.browse_json_file)
-        json_layout.addWidget(browse_btn)
-        layout.addWidget(json_frame)
+        browse_btn.clicked.connect(self.browse_folder)
+        folder_layout.addWidget(browse_btn)
+        layout.addWidget(folder_frame)
 
-        # 서비스 계정 이메일 표시
-        self.email_label = QLabel("")
-        self.email_label.setStyleSheet("color: #6ee7b7; font-size: 11px;")
-        layout.addWidget(self.email_label)
-        self.update_email_label()
-        layout.addSpacing(12)
-
-        # 스프레드시트 ID
-        sheet_label = QLabel("스프레드시트 ID")
-        sheet_label.setStyleSheet("font-size: 12px; color: #94a3b8;")
-        layout.addWidget(sheet_label)
+        # 기본값 복원 버튼
+        reset_btn = QPushButton("기본 폴더로 복원")
+        reset_btn.setFixedSize(140, 32)
+        reset_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: 1px solid #475569;
+                border-radius: 6px;
+                color: #94a3b8;
+                font-size: 12px;
+                min-height: 16px;
+                padding: 4px 12px;
+            }
+            QPushButton:hover {
+                background-color: #1e293b;
+                color: #ffffff;
+            }
+        """)
+        reset_btn.clicked.connect(self.reset_folder)
+        layout.addWidget(reset_btn)
         layout.addSpacing(4)
 
-        self.sheet_id_input = QLineEdit()
-        self.sheet_id_input.setPlaceholderText("스프레드시트 URL에서 /d/ 뒤의 ID를 복사")
-        self.sheet_id_input.setText(self.google_sync.spreadsheet_id if self.google_sync else "")
-        self.sheet_id_input.setFixedHeight(38)
-        layout.addWidget(self.sheet_id_input)
-        layout.addSpacing(8)
-
-        # 자동 동기화 체크박스
-        self.auto_sync_check = QCheckBox("저장 시 자동 동기화")
-        self.auto_sync_check.setChecked(self.google_sync.auto_sync_enabled if self.google_sync else False)
-        layout.addWidget(self.auto_sync_check)
-        layout.addSpacing(8)
-
-        # 연결 테스트 버튼
-        self.test_btn = QPushButton("연결 테스트")
-        self.test_btn.setFixedSize(120, 38)
-        self.test_btn.clicked.connect(self.test_connection)
-        layout.addWidget(self.test_btn)
-
-        # 상태 라벨
-        self.status_label = QLabel("")
-        self.status_label.setStyleSheet("font-size: 12px;")
-        layout.addWidget(self.status_label)
+        # 현재 저장 파일 경로 표시
+        self.file_path_label = QLabel("")
+        self.file_path_label.setStyleSheet("color: #64748b; font-size: 11px;")
+        self.file_path_label.setWordWrap(True)
+        self.update_file_path_label()
+        layout.addWidget(self.file_path_label)
         layout.addSpacing(16)
 
         # 구분선
@@ -1586,34 +1562,6 @@ class SettingsDialog(QDialog):
         line2.setFixedHeight(1)
         layout.addWidget(line2)
         layout.addSpacing(16)
-
-        # ===== 업데이트 섹션 =====
-        update_title = QLabel("업데이트")
-        update_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffffff;")
-        layout.addWidget(update_title)
-        layout.addSpacing(8)
-
-        update_url_label = QLabel("업데이트 체크 URL")
-        update_url_label.setStyleSheet("font-size: 12px; color: #94a3b8;")
-        layout.addWidget(update_url_label)
-        layout.addSpacing(4)
-
-        self.update_url_input = QLineEdit()
-        self.update_url_input.setPlaceholderText("https://example.com/version.json")
-        self.update_url_input.setText(self.app_settings.update_check_url)
-        self.update_url_input.setFixedHeight(38)
-        layout.addWidget(self.update_url_input)
-        layout.addSpacing(8)
-
-        # 업데이트 체크 버튼
-        self.update_check_btn = QPushButton("지금 업데이트 확인")
-        self.update_check_btn.setFixedSize(150, 38)
-        self.update_check_btn.clicked.connect(self.check_update_now)
-        layout.addWidget(self.update_check_btn)
-
-        self.update_status_label = QLabel("")
-        self.update_status_label.setStyleSheet("font-size: 12px;")
-        layout.addWidget(self.update_status_label)
 
         layout.addStretch()
         layout.addSpacing(16)
@@ -1643,99 +1591,25 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(btn_frame)
 
-    def browse_json_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "서비스 계정 JSON 파일 선택", "", "JSON Files (*.json)")
-        if file_path:
-            self.json_path_input.setText(file_path)
-            self.update_email_label()
+    def browse_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "스니펫 저장 폴더 선택", self.folder_input.text())
+        if folder:
+            self.folder_input.setText(folder)
+            self.update_file_path_label()
 
-    def update_email_label(self):
-        json_path = self.json_path_input.text()
-        if json_path and os.path.exists(json_path):
-            try:
-                with open(json_path, 'r') as f:
-                    data = json.load(f)
-                    email = data.get('client_email', '')
-                    if email:
-                        self.email_label.setText(f"서비스 계정: {email}")
-                        self.email_label.setStyleSheet("color: #6ee7b7; font-size: 11px;")
-                    else:
-                        self.email_label.setText("유효하지 않은 서비스 계정 파일입니다.")
-                        self.email_label.setStyleSheet("color: #fb7185; font-size: 11px;")
-            except:
-                self.email_label.setText("JSON 파일을 읽을 수 없습니다.")
-                self.email_label.setStyleSheet("color: #fb7185; font-size: 11px;")
-        else:
-            self.email_label.setText("")
+    def reset_folder(self):
+        self.folder_input.setText(DEFAULT_STORAGE_FOLDER)
+        self.update_file_path_label()
 
-    def test_connection(self):
-        if not self.google_sync:
-            self.status_label.setText("Google Sheets 모듈을 사용할 수 없습니다.")
-            self.status_label.setStyleSheet("color: #fb7185; font-size: 12px;")
-            return
-
-        self.google_sync.service_account_file = self.json_path_input.text()
-        self.google_sync.spreadsheet_id = self.sheet_id_input.text()
-
-        self.status_label.setText("연결 테스트 중...")
-        self.status_label.setStyleSheet("color: #fbbf24; font-size: 12px;")
-        self.test_btn.setEnabled(False)
-        QApplication.processEvents()
-
-        success, message = self.google_sync.test_connection()
-        if success:
-            self.status_label.setText(f"✓ {message}")
-            self.status_label.setStyleSheet("color: #6ee7b7; font-size: 12px;")
-        else:
-            self.status_label.setText(f"✗ {message}")
-            self.status_label.setStyleSheet("color: #fb7185; font-size: 12px;")
-        self.test_btn.setEnabled(True)
-
-    def check_update_now(self):
-        url = self.update_url_input.text()
-        if not url:
-            self.update_status_label.setText("업데이트 URL을 입력해주세요.")
-            self.update_status_label.setStyleSheet("color: #fb7185; font-size: 12px;")
-            return
-
-        self.update_status_label.setText("업데이트 확인 중...")
-        self.update_status_label.setStyleSheet("color: #fbbf24; font-size: 12px;")
-        self.update_check_btn.setEnabled(False)
-        QApplication.processEvents()
-
-        has_update, latest_ver, download_url = check_for_updates(url)
-
-        if has_update:
-            self.update_status_label.setText(f"새 버전 {latest_ver} 사용 가능!")
-            self.update_status_label.setStyleSheet("color: #6ee7b7; font-size: 12px;")
-            reply = QMessageBox.question(
-                self, '업데이트 가능',
-                f"새 버전 {latest_ver}이(가) 있습니다.\n\n다운로드 페이지를 여시겠습니까?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            if reply == QMessageBox.StandardButton.Yes and download_url:
-                import webbrowser
-                webbrowser.open(download_url)
-        elif latest_ver:
-            self.update_status_label.setText(f"✓ 최신 버전입니다 (v{APP_VERSION})")
-            self.update_status_label.setStyleSheet("color: #6ee7b7; font-size: 12px;")
-        else:
-            self.update_status_label.setText("업데이트 확인 실패")
-            self.update_status_label.setStyleSheet("color: #fb7185; font-size: 12px;")
-
-        self.update_check_btn.setEnabled(True)
+    def update_file_path_label(self):
+        folder = self.folder_input.text()
+        self.file_path_label.setText(f"저장 파일: {os.path.join(folder, 'snippets.json')}")
 
     def save_settings(self):
         # 앱 설정 저장
         self.app_settings.start_with_windows = self.startup_check.isChecked()
         self.app_settings.start_minimized = self.minimized_check.isChecked()
-        self.app_settings.update_check_url = self.update_url_input.text()
-
-        # Google Sheets 설정 저장
-        if self.google_sync:
-            self.google_sync.service_account_file = self.json_path_input.text()
-            self.google_sync.spreadsheet_id = self.sheet_id_input.text()
-            self.google_sync.auto_sync_enabled = self.auto_sync_check.isChecked()
+        self.app_settings.storage_folder = self.folder_input.text()
 
         self.accept()
 
@@ -1760,17 +1634,15 @@ def main():
     # 앱 설정 초기화
     app_settings = AppSettings()
 
-    # Google Sheets 동기화 초기화
-    google_sync = None
-    if GOOGLE_SHEETS_AVAILABLE:
-        google_sync = GoogleSheetsSync(APP_DIR)
+    # 저장 폴더 생성
+    os.makedirs(app_settings.storage_folder, exist_ok=True)
 
     # 매니저 및 엔진 초기화
-    manager = SnippetManager(google_sync=google_sync)
+    manager = SnippetManager(snippets_file=app_settings.snippets_file)
     engine = SnippetEngine(manager)
 
     # GUI 생성
-    window = QfredApp(manager, engine, google_sync=google_sync, app_settings=app_settings)
+    window = QfredApp(manager, engine, app_settings=app_settings)
 
     # 트레이 모드: 설정에 따라 창 표시 여부 결정
     if app_settings.start_minimized:
@@ -1781,17 +1653,6 @@ def main():
 
     # 엔진 시작 (창이 숨겨져 있어도 동작)
     engine.start()
-
-    # 백그라운드에서 업데이트 체크
-    def check_update_background():
-        if app_settings.update_check_url:
-            has_update, latest_ver, download_url = check_for_updates(app_settings.update_check_url)
-            if has_update:
-                # 메인 스레드에서 알림 표시
-                window.show_update_notification(latest_ver, download_url)
-
-    update_thread = threading.Thread(target=check_update_background, daemon=True)
-    update_thread.start()
 
     sys.exit(app.exec())
 
