@@ -28,7 +28,7 @@ jobs:
 
       - name: Build EXE
         run: |
-          pyinstaller --onefile --windowed --name Qfred --icon q_logo_hd.ico --add-data "q_logo.ico;." --add-data "q_logo.png;." --add-data "q_logo_hd.ico;." qfred_pyqt.py
+          pyinstaller --onefile --windowed --name Qfred --icon q_logo_hd.ico --add-data "q_logo.ico;." --add-data "q_logo.png;." --add-data "q_logo_hd.ico;." --hidden-import PyQt6.sip --hidden-import PyQt6.QtCore --hidden-import PyQt6.QtGui --hidden-import PyQt6.QtWidgets qfred_pyqt.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
