@@ -12,6 +12,9 @@ import pyperclip
 import uuid
 import ctypes
 import winreg
+import urllib.request
+import subprocess
+import tempfile
 from datetime import datetime
 from pynput import keyboard as pynput_keyboard
 from pynput.keyboard import Key, Controller
@@ -19,6 +22,8 @@ from pynput.keyboard import Key, Controller
 # 앱 버전
 APP_VERSION = "1.0.0"
 APP_NAME = "Q-fred"
+GITHUB_REPO = "dumock/Qfred"
+GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 # 콘솔 창 숨기기
 def hide_console():
@@ -150,6 +155,108 @@ class AppSettings:
         except:
             return False
 
+
+def check_for_updates() -> tuple[bool, str, str]:
+    """GitHub Releases에서 최신 버전 확인
+    Returns: (업데이트 있음 여부, 최신 버전, exe 다운로드 URL)
+    """
+    try:
+        req = urllib.request.Request(
+            GITHUB_API_URL,
+            headers={'User-Agent': 'Q-fred Update Checker', 'Accept': 'application/vnd.github.v3+json'}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            tag = data.get('tag_name', '')
+            latest_version = tag.lstrip('v')
+
+            if not latest_version:
+                return False, "", ""
+
+            # 버전 비교 (숫자 튜플로 비교)
+            def parse_version(v):
+                try:
+                    return tuple(int(x) for x in v.split('.'))
+                except:
+                    return (0,)
+
+            if parse_version(latest_version) > parse_version(APP_VERSION):
+                # assets에서 .exe 파일 찾기
+                download_url = ""
+                for asset in data.get('assets', []):
+                    if asset['name'].lower().endswith('.exe'):
+                        download_url = asset['browser_download_url']
+                        break
+                return True, latest_version, download_url
+
+        return False, APP_VERSION, ""
+    except Exception as e:
+        print(f"[UpdateChecker] 오류: {e}")
+        return False, "", ""
+
+
+def download_update(download_url: str, progress_callback=None) -> str:
+    """새 버전 exe 다운로드
+    Returns: 다운로드된 파일 경로 (실패 시 빈 문자열)
+    """
+    try:
+        app_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+        update_path = os.path.join(app_dir, "Qfred_update.exe")
+
+        req = urllib.request.Request(download_url, headers={'User-Agent': 'Q-fred Update Checker'})
+        with urllib.request.urlopen(req, timeout=120) as response:
+            total_size = int(response.headers.get('Content-Length', 0))
+            downloaded = 0
+            block_size = 8192
+
+            with open(update_path, 'wb') as f:
+                while True:
+                    chunk = response.read(block_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_callback and total_size > 0:
+                        progress_callback(int(downloaded * 100 / total_size))
+
+        return update_path
+    except Exception as e:
+        print(f"[UpdateDownload] 오류: {e}")
+        return ""
+
+
+def apply_update(update_path: str):
+    """batch 스크립트로 exe 교체 후 재시작"""
+    if getattr(sys, 'frozen', False):
+        current_exe = sys.executable
+    else:
+        # 스크립트 모드에서는 교체 불필요
+        print("[Update] 스크립트 모드에서는 자동 교체를 지원하지 않습니다.")
+        return
+
+    app_dir = os.path.dirname(current_exe)
+    bat_path = os.path.join(app_dir, "_update.bat")
+    exe_name = os.path.basename(current_exe)
+    update_name = os.path.basename(update_path)
+
+    bat_content = f'''@echo off
+chcp 65001 >nul
+echo Q-fred 업데이트 중...
+timeout /t 2 /nobreak >nul
+del /f "{exe_name}"
+move /Y "{update_name}" "{exe_name}"
+start "" "{exe_name}"
+del "%~f0"
+'''
+    with open(bat_path, 'w', encoding='utf-8') as f:
+        f.write(bat_content)
+
+    subprocess.Popen(
+        ['cmd', '/c', bat_path],
+        cwd=app_dir,
+        creationflags=subprocess.CREATE_NO_WINDOW
+    )
+    sys.exit(0)
 
 
 # 한글 -> QWERTY 매핑
@@ -1261,6 +1368,46 @@ class QfredApp(QMainWindow):
         self.tray_icon.hide()
         QApplication.quit()
 
+    def show_update_notification(self, latest_ver: str, download_url: str):
+        """업데이트 알림 표시 (메인 스레드에서 호출)"""
+        QTimer.singleShot(0, lambda: self._show_update_dialog(latest_ver, download_url))
+
+    def _show_update_dialog(self, latest_ver: str, download_url: str):
+        """업데이트 다이얼로그"""
+        if not download_url:
+            return
+
+        reply = QMessageBox.question(
+            self, 'Q-fred 업데이트',
+            f"새 버전 {latest_ver}이(가) 있습니다.\n현재 버전: {APP_VERSION}\n\n업데이트 하시겠습니까?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # 프로그레스 다이얼로그
+        progress = QMessageBox(self)
+        progress.setWindowTitle("업데이트")
+        progress.setText("다운로드 중... 0%")
+        progress.setStandardButtons(QMessageBox.StandardButton.NoButton)
+        progress.show()
+        QApplication.processEvents()
+
+        def on_progress(percent):
+            progress.setText(f"다운로드 중... {percent}%")
+            QApplication.processEvents()
+
+        # 다운로드 (메인 스레드에서 실행 - UI 업데이트 위해)
+        update_path = download_update(download_url, progress_callback=on_progress)
+        progress.close()
+
+        if update_path:
+            QMessageBox.information(self, '업데이트', '다운로드 완료! 앱을 재시작합니다.')
+            self.engine.stop()
+            self.tray_icon.hide()
+            apply_update(update_path)
+        else:
+            QMessageBox.warning(self, '업데이트 실패', '다운로드에 실패했습니다.\n나중에 다시 시도해주세요.')
 
     def load_snippets_list(self, filter_text=""):
         """스니펫 리스트 로드"""
@@ -1653,6 +1800,15 @@ def main():
 
     # 엔진 시작 (창이 숨겨져 있어도 동작)
     engine.start()
+
+    # 백그라운드에서 업데이트 체크
+    def check_update_background():
+        has_update, latest_ver, download_url = check_for_updates()
+        if has_update:
+            window.show_update_notification(latest_ver, download_url)
+
+    update_thread = threading.Thread(target=check_update_background, daemon=True)
+    update_thread.start()
 
     sys.exit(app.exec())
 
