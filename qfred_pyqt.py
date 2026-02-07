@@ -25,7 +25,7 @@ from pynput import keyboard as pynput_keyboard
 from pynput.keyboard import Key, Controller
 
 # 앱 버전
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 APP_NAME = "Q-fred"
 GITHUB_REPO = "dumock/Qfred"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -1736,7 +1736,7 @@ class SettingsDialog(QDialog):
 def main():
     # 중복 실행 방지
     import tempfile
-    lock_file = os.path.join(tempfile.gettempdir(), "qfred_pyqt.lock")
+    lock_file = os.path.join(tempfile.gettempdir(), "qfred.lock")
 
     try:
         # Windows에서 파일 잠금
@@ -1747,6 +1747,16 @@ def main():
         # 이미 실행 중
         print("Q-fred is already running.")
         sys.exit(0)
+
+    # 앱 종료 시 lock 파일 자동 삭제
+    import atexit
+    def cleanup_lock():
+        try:
+            lock_handle.close()
+            os.remove(lock_file)
+        except:
+            pass
+    atexit.register(cleanup_lock)
 
     app = QApplication(sys.argv)
 
