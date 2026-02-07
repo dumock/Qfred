@@ -26,7 +26,7 @@ from pynput import keyboard as pynput_keyboard
 from pynput.keyboard import Key, Controller
 
 # 앱 버전
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.0.10"
 APP_NAME = "Q-fred"
 GITHUB_REPO = "dumock/Qfred"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -209,7 +209,7 @@ class AppSettings:
 
     @property
     def start_minimized(self) -> bool:
-        return self._settings.get('start_minimized', True)
+        return self._settings.get('start_minimized', False)
 
     @start_minimized.setter
     def start_minimized(self, value: bool):
