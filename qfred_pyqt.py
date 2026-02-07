@@ -25,7 +25,7 @@ from pynput import keyboard as pynput_keyboard
 from pynput.keyboard import Key, Controller
 
 # 앱 버전
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 APP_NAME = "Q-fred"
 GITHUB_REPO = "dumock/Qfred"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -53,8 +53,10 @@ from PyQt6.QtGui import QIcon, QPixmap, QFont, QColor, QPalette, QAction, QFontD
 # PyInstaller exe로 실행 시 exe 파일 위치, 스크립트 실행 시 스크립트 위치 사용
 if getattr(sys, 'frozen', False):
     APP_DIR = os.path.dirname(sys.executable)
+    RESOURCE_DIR = sys._MEIPASS
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
+    RESOURCE_DIR = APP_DIR
 
 # 기본 저장 폴더: %APPDATA%\Qfred
 DEFAULT_STORAGE_FOLDER = os.path.join(os.environ.get('APPDATA', APP_DIR), 'Qfred')
@@ -735,7 +737,7 @@ class QfredApp(QMainWindow):
         self.resize(950, 600)
 
         # 아이콘 설정
-        logo_path = os.path.join(APP_DIR, "q_logo_hd.ico")
+        logo_path = os.path.join(RESOURCE_DIR, "q_logo_hd.ico")
         if os.path.exists(logo_path):
             self.setWindowIcon(QIcon(logo_path))
 
@@ -1327,7 +1329,7 @@ class QfredApp(QMainWindow):
         """시스템 트레이 설정"""
         self.tray_icon = QSystemTrayIcon(self)
 
-        logo_path = os.path.join(APP_DIR, "q_logo_hd.ico")
+        logo_path = os.path.join(RESOURCE_DIR, "q_logo_hd.ico")
         if os.path.exists(logo_path):
             self.tray_icon.setIcon(QIcon(logo_path))
 
