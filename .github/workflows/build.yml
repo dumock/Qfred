@@ -26,9 +26,30 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Find Qt plugins path
+        id: qt
+        shell: python
+        run: |
+          import os, PyQt6
+          qt_dir = os.path.dirname(PyQt6.__file__)
+          plugins = os.path.join(qt_dir, "Qt6", "plugins")
+          print(f"plugins_path={plugins}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"plugins_path={plugins}\n")
+
       - name: Build EXE
         run: |
-          pyinstaller --onefile --windowed --name Qfred --icon q_logo_hd.ico --add-data "q_logo.ico;." --add-data "q_logo.png;." --add-data "q_logo_hd.ico;." --hidden-import PyQt6.sip --hidden-import PyQt6.QtCore --hidden-import PyQt6.QtGui --hidden-import PyQt6.QtWidgets qfred_pyqt.py
+          pyinstaller --onefile --windowed --name Qfred --icon q_logo_hd.ico `
+            --add-data "q_logo.ico;." `
+            --add-data "q_logo.png;." `
+            --add-data "q_logo_hd.ico;." `
+            --add-data "${{ steps.qt.outputs.plugins_path }}/platforms;PyQt6/Qt6/plugins/platforms" `
+            --add-data "${{ steps.qt.outputs.plugins_path }}/styles;PyQt6/Qt6/plugins/styles" `
+            --hidden-import PyQt6.sip `
+            --hidden-import PyQt6.QtCore `
+            --hidden-import PyQt6.QtGui `
+            --hidden-import PyQt6.QtWidgets `
+            qfred_pyqt.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

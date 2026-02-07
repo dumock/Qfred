@@ -8,6 +8,11 @@ import os
 import sys
 import threading
 import time
+
+# PyInstaller frozen exe: Qt 플러그인 경로 설정
+if getattr(sys, 'frozen', False):
+    base_path = sys._MEIPASS
+    os.environ['QT_PLUGIN_PATH'] = os.path.join(base_path, 'PyQt6', 'Qt6', 'plugins')
 import pyperclip
 import uuid
 import ctypes
@@ -20,7 +25,7 @@ from pynput import keyboard as pynput_keyboard
 from pynput.keyboard import Key, Controller
 
 # 앱 버전
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 APP_NAME = "Q-fred"
 GITHUB_REPO = "dumock/Qfred"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
