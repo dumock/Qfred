@@ -20,6 +20,15 @@ __pycache__/
 Thumbs.db
 nul
 
+# Build
+build/
+dist/
+*.spec
+
+# Data & settings
+snippets.json
+app_settings.json
+
 # Local settings
 *.lock
 
