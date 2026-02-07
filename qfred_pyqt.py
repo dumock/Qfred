@@ -16,6 +16,7 @@ if getattr(sys, 'frozen', False):
 import pyperclip
 import uuid
 import ctypes
+import ctypes.wintypes
 import winreg
 import urllib.request
 import subprocess
@@ -25,7 +26,7 @@ from pynput import keyboard as pynput_keyboard
 from pynput.keyboard import Key, Controller
 
 # 앱 버전
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.9"
 APP_NAME = "Q-fred"
 GITHUB_REPO = "dumock/Qfred"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -40,6 +41,113 @@ def hide_console():
         pass
 
 hide_console()
+
+# --- Windows SendInput 직접 호출 (pynput 우회) ---
+INPUT_KEYBOARD = 1
+KEYEVENTF_KEYUP = 0x0002
+VK_BACK = 0x08
+VK_CONTROL = 0x11
+VK_SHIFT = 0x10
+VK_INSERT = 0x2D
+VK_V = 0x56
+
+class KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ('wVk', ctypes.c_ushort),
+        ('wScan', ctypes.c_ushort),
+        ('dwFlags', ctypes.c_ulong),
+        ('time', ctypes.c_ulong),
+        ('dwExtraInfo', ctypes.POINTER(ctypes.c_ulong)),
+    ]
+
+class INPUT(ctypes.Structure):
+    class _INPUT(ctypes.Union):
+        _fields_ = [('ki', KEYBDINPUT), ('padding', ctypes.c_byte * 32)]
+    _anonymous_ = ('_input',)
+    _fields_ = [('type', ctypes.c_ulong), ('_input', _INPUT)]
+
+def _send_key(vk, flags=0):
+    """키 이벤트 하나를 SendInput으로 전송"""
+    inp = INPUT()
+    inp.type = INPUT_KEYBOARD
+    inp.ki.wVk = vk
+    inp.ki.dwFlags = flags
+    arr = (INPUT * 1)(inp)
+    return ctypes.windll.user32.SendInput(1, arr, ctypes.sizeof(INPUT))
+
+def _make_input(vk, flags=0):
+    """INPUT 구조체 생성"""
+    inp = INPUT()
+    inp.type = INPUT_KEYBOARD
+    inp.ki.wVk = vk
+    inp.ki.dwFlags = flags
+    return inp
+
+def send_backspaces(count):
+    """백스페이스를 count번 전송 (한 번에 down+up 원자적)"""
+    for _ in range(count):
+        arr = (INPUT * 2)(_make_input(VK_BACK), _make_input(VK_BACK, KEYEVENTF_KEYUP))
+        ctypes.windll.user32.SendInput(2, arr, ctypes.sizeof(INPUT))
+        time.sleep(0.02)
+
+KEYEVENTF_UNICODE = 0x0004
+
+def send_paste():
+    """Ctrl+V로 붙여넣기"""
+    arr = (INPUT * 4)(
+        _make_input(VK_CONTROL),
+        _make_input(VK_V),
+        _make_input(VK_V, KEYEVENTF_KEYUP),
+        _make_input(VK_CONTROL, KEYEVENTF_KEYUP),
+    )
+    ctypes.windll.user32.SendInput(4, arr, ctypes.sizeof(INPUT))
+
+def send_paste_shift_insert():
+    """Shift+Insert로 붙여넣기 (콘솔용)"""
+    arr = (INPUT * 4)(
+        _make_input(VK_SHIFT),
+        _make_input(VK_INSERT),
+        _make_input(VK_INSERT, KEYEVENTF_KEYUP),
+        _make_input(VK_SHIFT, KEYEVENTF_KEYUP),
+    )
+    ctypes.windll.user32.SendInput(4, arr, ctypes.sizeof(INPUT))
+
+def is_console_window():
+    """포그라운드 윈도우가 콘솔/터미널인지 감지"""
+    hwnd = ctypes.windll.user32.GetForegroundWindow()
+    class_name = ctypes.create_unicode_buffer(256)
+    ctypes.windll.user32.GetClassNameW(hwnd, class_name, 256)
+    name = class_name.value.lower()
+    return ('console' in name or 'terminal' in name
+            or 'cascadia' in name or 'mintty' in name
+            or 'cmd' in name or 'powershell' in name)
+
+def send_unicode_string(text):
+    """SendInput + KEYEVENTF_UNICODE로 문자열 원자적 전송 (클립보드 불필요, 한번에 출력)"""
+    events = []
+    for char in text:
+        if char == '\n':
+            events.append(_make_input(0x0D))
+            events.append(_make_input(0x0D, KEYEVENTF_KEYUP))
+        else:
+            down = INPUT()
+            down.type = INPUT_KEYBOARD
+            down.ki.wVk = 0
+            down.ki.wScan = ord(char)
+            down.ki.dwFlags = KEYEVENTF_UNICODE
+            events.append(down)
+
+            up = INPUT()
+            up.type = INPUT_KEYBOARD
+            up.ki.wVk = 0
+            up.ki.wScan = ord(char)
+            up.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+            events.append(up)
+
+    if events:
+        arr = (INPUT * len(events))(*events)
+        ctypes.windll.user32.SendInput(len(events), arr, ctypes.sizeof(INPUT))
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QTextEdit, QPushButton, QListWidget, QListWidgetItem,
@@ -456,6 +564,7 @@ class SnippetEngine(QObject):
         self.trigger_map = {}
         self.max_trigger_len = 0
         self.is_replacing = False
+        self._last_replace_time = 0.0
         self.listener = None
         self.keyboard_controller = Controller()
         self.ctrl_pressed = False
@@ -491,11 +600,17 @@ class SnippetEngine(QObject):
             self.buffer = ""
             return
 
-        # 종결키 처리
-        if key == Key.space or key == Key.enter or key == Key.tab:
-            matched = self._check_triggers_on_end_key()
-            if not matched:
-                self.buffer = ""
+        # 종결키 처리: 버퍼 즉시 캡처 & 초기화 후 지연 체크
+        if key == Key.space or key == Key.tab:
+            buf_snapshot = self.buffer
+            self.buffer = ""  # 즉시 초기화 → 중복 스페이스 이벤트 방지
+            if buf_snapshot:
+                def _delayed_check(snapshot=buf_snapshot):
+                    time.sleep(0.05)  # IME 조합 완료 대기
+                    if self.is_replacing:
+                        return
+                    self._check_triggers_snapshot(snapshot)
+                threading.Thread(target=_delayed_check, daemon=True).start()
             return
 
         # Backspace 처리
@@ -505,7 +620,7 @@ class SnippetEngine(QObject):
             return
 
         # 네비게이션 키 - 버퍼 초기화
-        if key in [Key.esc, Key.left, Key.right, Key.up, Key.down, Key.home, Key.end, Key.delete]:
+        if key in [Key.esc, Key.enter, Key.left, Key.right, Key.up, Key.down, Key.home, Key.end, Key.delete]:
             self.buffer = ""
             return
 
@@ -520,18 +635,26 @@ class SnippetEngine(QObject):
             pass
 
     def on_release(self, key):
+        if self.is_replacing:
+            return
         # Modifier 키 해제 추적
         if key == Key.ctrl_l or key == Key.ctrl_r:
             self.ctrl_pressed = False
         if key == Key.alt_l or key == Key.alt_r or key == Key.alt_gr:
             self.alt_pressed = False
 
-    def _check_triggers_on_end_key(self) -> bool:
+    def _check_triggers_snapshot(self, snapshot: str) -> bool:
+        """스냅샷 기반 트리거 체크 (self.buffer 건드리지 않음)"""
+        now = time.monotonic()
+        elapsed = now - self._last_replace_time
         if self.is_replacing:
             return False
+        # 디바운스: 마지막 치환 후 300ms 이내 재발동 방지
+        if elapsed < 0.3:
+            return False
         for trigger, content in self.trigger_map.items():
-            if self.buffer.endswith(trigger):
-                self.is_replacing = True  # 먼저 플래그 설정
+            if snapshot.endswith(trigger):
+                self.is_replacing = True
                 self.buffer = ""
                 threading.Thread(target=self._replace, args=(trigger, content), daemon=True).start()
                 return True
@@ -539,42 +662,69 @@ class SnippetEngine(QObject):
 
     def _replace(self, trigger: str, content: str):
         try:
+            time.sleep(0.1)  # IME 조합 완료 대기
+
+            # 리스너 일시 중지 (pynput이 Ctrl+V를 중복 처리하는 것 방지)
+            if self.listener:
+                self.listener.stop()
+                self.listener = None
             time.sleep(0.05)
 
-            try:
-                old_clipboard = pyperclip.paste()
-            except:
-                old_clipboard = ""
-
+            # ctypes SendInput으로 백스페이스
             backspace_count = len(trigger) + 1
-            for _ in range(backspace_count):
-                self.keyboard_controller.press(Key.backspace)
-                self.keyboard_controller.release(Key.backspace)
-                time.sleep(0.02)
-
-            time.sleep(0.05)
-            pyperclip.copy(content)
+            send_backspaces(backspace_count)
             time.sleep(0.05)
 
-            # Ctrl+V
-            self.keyboard_controller.press(Key.ctrl_l)
-            time.sleep(0.01)
-            self.keyboard_controller.press('v')
-            time.sleep(0.01)
-            self.keyboard_controller.release('v')
-            time.sleep(0.01)
-            self.keyboard_controller.release(Key.ctrl_l)
-            time.sleep(0.15)
+            # 콘솔/GUI 감지 후 분기
+            console = is_console_window()
 
-            try:
-                pyperclip.copy(old_clipboard)
-            except:
-                pass
-        except:
+            if console:
+                # 콘솔: 항상 클립보드 + Shift+Insert
+                try:
+                    old_clipboard = pyperclip.paste()
+                except:
+                    old_clipboard = ""
+                pyperclip.copy(content)
+                time.sleep(0.05)
+                send_paste_shift_insert()
+                time.sleep(0.2)
+                try:
+                    pyperclip.copy(old_clipboard)
+                except:
+                    pass
+            elif len(content) <= 50:
+                # GUI 짧은 텍스트: UNICODE 직접 입력
+                send_unicode_string(content)
+                time.sleep(0.1)
+            else:
+                # GUI 긴 텍스트: 클립보드 + Ctrl+V
+                try:
+                    old_clipboard = pyperclip.paste()
+                except:
+                    old_clipboard = ""
+                pyperclip.copy(content)
+                time.sleep(0.05)
+                send_paste()
+                time.sleep(0.2)
+                try:
+                    pyperclip.copy(old_clipboard)
+                except:
+                    pass
+        except Exception:
             pass
         finally:
-            self.buffer = ""  # 버퍼 초기화
+            self.buffer = ""
+            self.ctrl_pressed = False
+            self.alt_pressed = False
+            self._last_replace_time = time.monotonic()
             self.is_replacing = False
+            # 리스너 재시작
+            if self.running:
+                self.listener = pynput_keyboard.Listener(
+                    on_press=self.on_press,
+                    on_release=self.on_release
+                )
+                self.listener.start()
 
     def start(self):
         if not self.running:
