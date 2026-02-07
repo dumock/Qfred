@@ -23,7 +23,6 @@ nul
 # Build
 build/
 dist/
-*.spec
 
 # Data & settings
 snippets.json
