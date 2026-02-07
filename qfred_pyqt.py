@@ -730,7 +730,7 @@ class QfredApp(QMainWindow):
         self.resize(950, 600)
 
         # 아이콘 설정
-        logo_path = os.path.join(APP_DIR, "q_logo.png")
+        logo_path = os.path.join(APP_DIR, "q_logo_hd.ico")
         if os.path.exists(logo_path):
             self.setWindowIcon(QIcon(logo_path))
 
@@ -1322,7 +1322,7 @@ class QfredApp(QMainWindow):
         """시스템 트레이 설정"""
         self.tray_icon = QSystemTrayIcon(self)
 
-        logo_path = os.path.join(APP_DIR, "q_logo.png")
+        logo_path = os.path.join(APP_DIR, "q_logo_hd.ico")
         if os.path.exists(logo_path):
             self.tray_icon.setIcon(QIcon(logo_path))
 
@@ -1536,7 +1536,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.app_settings = app_settings
         self.setWindowTitle("설정")
-        self.setFixedSize(550, 620)
+        self.setFixedSize(500, 520)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowMaximizeButtonHint)
         self.setSizeGripEnabled(False)
         self.setStyleSheet("""
@@ -1577,31 +1577,8 @@ class SettingsDialog(QDialog):
         self.setup_ui()
 
     def setup_ui(self):
-        outer_layout = QVBoxLayout(self)
-        outer_layout.setContentsMargins(0, 0, 0, 0)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("""
-            QScrollArea { background-color: #0f172a; border: none; }
-            QScrollBar:vertical {
-                background: transparent; width: 6px;
-            }
-            QScrollBar::handle:vertical {
-                background-color: #334155; border-radius: 3px; min-height: 20px;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
-        """)
-
-        content_widget = QWidget()
-        content_widget.setStyleSheet("background-color: #0f172a;")
-        scroll.setWidget(content_widget)
-        outer_layout.addWidget(scroll)
-
-        layout = QVBoxLayout(content_widget)
-        layout.setContentsMargins(28, 28, 28, 28)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 28, 28, 24)
         layout.setSpacing(8)
 
         # ===== 일반 설정 섹션 =====
@@ -1700,18 +1677,8 @@ class SettingsDialog(QDialog):
         self.file_path_label.setWordWrap(True)
         self.update_file_path_label()
         layout.addWidget(self.file_path_label)
-        layout.addSpacing(16)
-
-        # 구분선
-        line2 = QFrame()
-        line2.setFrameShape(QFrame.Shape.HLine)
-        line2.setStyleSheet("background-color: #334155;")
-        line2.setFixedHeight(1)
-        layout.addWidget(line2)
-        layout.addSpacing(16)
 
         layout.addStretch()
-        layout.addSpacing(16)
 
         # ===== 버튼 영역 =====
         btn_frame = QFrame()
