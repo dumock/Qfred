@@ -2435,7 +2435,9 @@ class DownloaderSettingsDialog(QDialog):
             }
         """)
         for g in self.app_settings.download_groups:
-            self.group_list.addItem(f"{g['name']}  \u2192  {g['folder'] or '(\ub8e8\ud2b8)'}")
+            name = g['name']
+            folder = g['folder'] or '(루트)'
+            self.group_list.addItem(f"{name}  →  {folder}")
         layout.addWidget(self.group_list)
 
         # 그룹 추가/삭제
@@ -2504,7 +2506,8 @@ class DownloaderSettingsDialog(QDialog):
         folder = self.grp_folder_input.text().strip() or name
         if not name:
             return
-        self.group_list.addItem(f"{name}  \u2192  {folder or '(\ub8e8\ud2b8)'}")
+        display_folder = folder or '(루트)'
+        self.group_list.addItem(f"{name}  →  {display_folder}")
         self.grp_name_input.clear()
         self.grp_folder_input.clear()
 
