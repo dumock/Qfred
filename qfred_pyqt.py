@@ -1906,11 +1906,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(general_title)
         layout.addSpacing(4)
 
-        # 버전 정보
-        version_label = QLabel(f"버전: {APP_VERSION}")
-        version_label.setStyleSheet("color: #64748b; font-size: 11px;")
-        layout.addWidget(version_label)
-        layout.addSpacing(8)
+        layout.addSpacing(4)
 
         # 시작 시 자동 실행
         self.startup_check = QCheckBox("Windows 시작 시 자동 실행")
@@ -2949,6 +2945,12 @@ class MainShell(QMainWindow):
         self.nav_buttons.append(download_btn)
 
         nav_layout.addStretch()
+
+        # 버전 표시
+        ver_label = QLabel(f"v{APP_VERSION}")
+        ver_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ver_label.setStyleSheet("color: #334155; font-size: 9px; background: transparent; border: none;")
+        nav_layout.addWidget(ver_label)
 
         main_layout.addWidget(nav)
 
