@@ -27,7 +27,7 @@ from pynput import keyboard as pynput_keyboard
 from pynput.keyboard import Key, Controller
 
 # 앱 버전
-APP_VERSION = "1.0.17"
+APP_VERSION = "1.0.19"
 APP_NAME = "Q-fred"
 GITHUB_REPO = "dumock/Qfred"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -2191,6 +2191,111 @@ class DownloadWorker(QThread):
             self.progress.emit({'percent': 100.0, 'speed': '', 'eta': ''})
 
 
+class DouyinDownloadWorker(QThread):
+    """도우인/틱톡 다운로드 워커 (맥미니 Douyin Worker API 경유)"""
+    progress = pyqtSignal(dict)
+    finished = pyqtSignal(dict)
+    info_ready = pyqtSignal(dict)
+
+    WORKER_API = "https://service.tubiq.net"
+
+    def __init__(self, url, output_path):
+        super().__init__()
+        self.url = url
+        self.output_path = output_path
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        try:
+            # 1) 도우인 워커에서 영상 정보 가져오기
+            import urllib.request
+            import urllib.parse
+            api_url = f"{self.WORKER_API}/api/hybrid/video_data?url={urllib.parse.quote(self.url, safe='')}&minimal=false"
+            req = urllib.request.Request(api_url, headers={'User-Agent': 'Q-fred Downloader'})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+
+            if data.get('code') != 200 or not data.get('data'):
+                self.finished.emit({'success': False, 'title': '', 'path': '', 'error': '도우인 영상 정보를 가져올 수 없습니다'})
+                return
+
+            vdata = data['data']
+            title = vdata.get('desc', '') or 'douyin_video'
+            # 파일명에 쓸 수 없는 문자 제거
+            safe_title = "".join(c for c in title if c not in r'\/:*?"<>|').strip()[:80] or 'douyin_video'
+            duration = vdata.get('duration', 0)
+            if isinstance(duration, (int, float)) and duration > 0:
+                dur_sec = int(duration / 1000) if duration > 1000 else int(duration)
+                dur_str = f"{dur_sec // 60}:{dur_sec % 60:02d}"
+            else:
+                dur_str = ""
+
+            # 썸네일
+            thumb = ""
+            video_info = vdata.get('video', {})
+            cover = video_info.get('cover', {})
+            if isinstance(cover, dict) and cover.get('url_list'):
+                thumb = cover['url_list'][0]
+
+            self.info_ready.emit({'title': safe_title, 'duration': dur_str, 'thumbnail': thumb})
+
+            if self._cancelled:
+                self.finished.emit({'success': False, 'title': safe_title, 'path': '', 'error': 'Cancelled'})
+                return
+
+            # 2) 다운로드 URL 추출
+            download_url = None
+            play_addr = video_info.get('play_addr', {})
+            if isinstance(play_addr, dict) and play_addr.get('url_list'):
+                download_url = play_addr['url_list'][0]
+
+            if not download_url:
+                # download_addr 시도
+                dl_addr = video_info.get('download_addr', {})
+                if isinstance(dl_addr, dict) and dl_addr.get('url_list'):
+                    download_url = dl_addr['url_list'][0]
+
+            if not download_url:
+                self.finished.emit({'success': False, 'title': safe_title, 'path': '', 'error': '다운로드 URL을 찾을 수 없습니다'})
+                return
+
+            # 3) 영상 파일 다운로드
+            os.makedirs(self.output_path, exist_ok=True)
+            file_path = os.path.join(self.output_path, f"{safe_title}.mp4")
+
+            req2 = urllib.request.Request(download_url, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Referer': 'https://www.douyin.com/',
+            })
+            with urllib.request.urlopen(req2, timeout=120) as resp2:
+                total = int(resp2.headers.get('Content-Length', 0))
+                downloaded = 0
+                block = 8192
+                with open(file_path, 'wb') as f:
+                    while True:
+                        if self._cancelled:
+                            self.finished.emit({'success': False, 'title': safe_title, 'path': '', 'error': 'Cancelled'})
+                            return
+                        chunk = resp2.read(block)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total > 0:
+                            pct = downloaded / total * 100
+                            speed = ""
+                            self.progress.emit({'percent': pct, 'speed': speed, 'eta': ''})
+
+            self.progress.emit({'percent': 100.0, 'speed': '', 'eta': ''})
+            self.finished.emit({'success': True, 'title': safe_title, 'path': self.output_path, 'error': ''})
+
+        except Exception as e:
+            self.finished.emit({'success': False, 'title': '', 'path': '', 'error': str(e)})
+
+
 class DownloadItemCard(QFrame):
     """다운로드 큐 아이템 카드"""
     cancelClicked = pyqtSignal(str)  # item_id
@@ -2832,8 +2937,12 @@ class DownloaderPage(QWidget):
         self.status_text.setText("다운로드 중...")
         self.path_label.setText(f"저장: {output_path}")
 
-        # 워커 시작
-        worker = DownloadWorker(url, output_path, audio_only)
+        # 워커 시작 (도우인/틱톡이면 DouyinDownloadWorker, 나머지는 yt-dlp)
+        is_douyin = any(k in url.lower() for k in ['douyin.com', 'v.douyin.com', 'tiktok.com', 'vt.tiktok.com'])
+        if is_douyin:
+            worker = DouyinDownloadWorker(url, output_path)
+        else:
+            worker = DownloadWorker(url, output_path, audio_only)
         worker.info_ready.connect(lambda info, c=card: c.set_title(info['title']))
         worker.progress.connect(lambda p, c=card: c.set_progress(p['percent'], p.get('speed', ''), p.get('eta', '')))
         worker.finished.connect(lambda r, iid=item_id: self._on_finished(iid, r))
