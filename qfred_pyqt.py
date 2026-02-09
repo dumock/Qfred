@@ -27,7 +27,7 @@ from pynput import keyboard as pynput_keyboard
 from pynput.keyboard import Key, Controller
 
 # 앱 버전
-APP_VERSION = "1.0.21"
+APP_VERSION = "1.0.22"
 APP_NAME = "Q-fred"
 GITHUB_REPO = "dumock/Qfred"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -2898,12 +2898,41 @@ class DownloaderPage(QWidget):
         else:
             self.group_combo.addItem("General")
 
+    @staticmethod
+    def extract_douyin_url(text):
+        """도우인/틱톡 공유 텍스트에서 실제 URL을 추출"""
+        import re
+        # 도우인/틱톡 URL 패턴 매칭
+        patterns = [
+            r'https?://v\.douyin\.com/[^\s]+',
+            r'https?://www\.douyin\.com/[^\s]+',
+            r'https?://douyin\.com/[^\s]+',
+            r'https?://vt\.tiktok\.com/[^\s]+',
+            r'https?://www\.tiktok\.com/[^\s]+',
+            r'https?://tiktok\.com/[^\s]+',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                url = match.group(0).rstrip('/')
+                # 끝에 붙은 중국어/특수문자 제거
+                url = re.sub(r'[^\x00-\x7F]+$', '', url).rstrip('/')
+                return url
+        return None
+
     def on_download(self):
-        url = self.url_input.text().strip()
-        if not url:
+        raw_text = self.url_input.text().strip()
+        if not raw_text:
             return
 
         self.url_input.clear()
+
+        # 도우인/틱톡 공유 텍스트에서 URL 추출
+        extracted = self.extract_douyin_url(raw_text)
+        if extracted:
+            url = extracted
+        else:
+            url = raw_text
 
         # 빈 상태 위젯 숨기기
         if self.empty_widget and self.empty_widget.isVisible():
