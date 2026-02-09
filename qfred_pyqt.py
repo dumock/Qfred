@@ -27,7 +27,7 @@ from pynput import keyboard as pynput_keyboard
 from pynput.keyboard import Key, Controller
 
 # 앱 버전
-APP_VERSION = "1.0.19"
+APP_VERSION = "1.0.20"
 APP_NAME = "Q-fred"
 GITHUB_REPO = "dumock/Qfred"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -3160,26 +3160,74 @@ class MainShell(QMainWindow):
             QMessageBox.warning(self, '업데이트 실패', '다운로드에 실패했습니다.\n나중에 다시 시도해주세요.')
 
 
+def kill_existing_qfred():
+    """기존 실행 중인 Q-fred 프로세스를 강제 종료"""
+    try:
+        current_pid = os.getpid()
+        # tasklist로 Qfred 프로세스 찾기
+        result = subprocess.run(
+            ['tasklist', '/FI', 'IMAGENAME eq Qfred.exe', '/FO', 'CSV', '/NH'],
+            capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW
+        )
+        for line in result.stdout.strip().split('\n'):
+            if 'Qfred.exe' in line:
+                parts = line.strip('"').split('","')
+                if len(parts) >= 2:
+                    pid = int(parts[1])
+                    if pid != current_pid:
+                        os.kill(pid, 9)
+                        print(f"[Startup] 기존 Q-fred (PID {pid}) 종료")
+                        time.sleep(0.5)
+        # python으로 실행 중인 경우도 처리
+        result2 = subprocess.run(
+            ['wmic', 'process', 'where', "commandline like '%qfred_pyqt%'", 'get', 'processid'],
+            capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW
+        )
+        for line in result2.stdout.strip().split('\n'):
+            line = line.strip()
+            if line.isdigit():
+                pid = int(line)
+                if pid != current_pid:
+                    os.kill(pid, 9)
+                    print(f"[Startup] 기존 Q-fred python (PID {pid}) 종료")
+                    time.sleep(0.5)
+    except Exception as e:
+        print(f"[Startup] 기존 프로세스 종료 실패 (무시): {e}")
+
+
 def main():
-    # 중복 실행 방지
+    # 기존 Q-fred 프로세스 강제 종료 후 시작
     import tempfile
     lock_file = os.path.join(tempfile.gettempdir(), "qfred.lock")
 
     try:
-        # Windows에서 파일 잠금
         lock_handle = open(lock_file, 'w')
         import msvcrt
         msvcrt.locking(lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
     except:
-        # 이미 실행 중
-        print("Q-fred is already running.")
-        sys.exit(0)
+        # 이미 실행 중 → 기존 프로세스 강제 종료
+        print("[Startup] 기존 Q-fred 감지, 강제 종료 후 재시작...")
+        kill_existing_qfred()
+        # 락 파일 삭제 후 다시 시도
+        try:
+            os.remove(lock_file)
+        except:
+            pass
+        time.sleep(1)
+        try:
+            lock_handle = open(lock_file, 'w')
+            import msvcrt
+            msvcrt.locking(lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except:
+            print("[Startup] 락 획득 실패, 강제 진행")
+            lock_handle = None
 
     # 앱 종료 시 lock 파일 자동 삭제
     import atexit
     def cleanup_lock():
         try:
-            lock_handle.close()
+            if lock_handle:
+                lock_handle.close()
             os.remove(lock_file)
         except:
             pass
