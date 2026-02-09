@@ -14,6 +14,7 @@ if getattr(sys, 'frozen', False):
     base_path = sys._MEIPASS
     os.environ['QT_PLUGIN_PATH'] = os.path.join(base_path, 'PyQt6', 'Qt6', 'plugins')
 import pyperclip
+import yt_dlp
 import uuid
 import ctypes
 import ctypes.wintypes
@@ -199,9 +200,10 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QTextEdit, QPushButton, QListWidget, QListWidgetItem,
     QFrame, QScrollArea, QSystemTrayIcon, QMenu, QSplitter, QMessageBox,
-    QSizePolicy, QStackedWidget, QSpacerItem, QDialog, QFileDialog, QCheckBox
+    QSizePolicy, QStackedWidget, QSpacerItem, QDialog, QFileDialog, QCheckBox,
+    QComboBox, QProgressBar
 )
-from PyQt6.QtCore import Qt, QSize, pyqtSignal, QObject, QTimer, QEvent
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QObject, QTimer, QEvent, QThread
 from PyQt6.QtGui import QIcon, QPixmap, QFont, QColor, QPalette, QAction, QFontDatabase, QCursor
 
 # 설정 파일 경로
@@ -221,11 +223,20 @@ APP_SETTINGS_FILE = os.path.join(APP_DIR, "app_settings.json")
 class AppSettings:
     """앱 설정 관리 클래스"""
 
+    DEFAULT_DOWNLOAD_FOLDER = os.path.join(os.path.expanduser('~'), 'Downloads')
+
     def __init__(self):
         self._settings = {
             'start_with_windows': False,
             'start_minimized': False,
             'storage_folder': DEFAULT_STORAGE_FOLDER,
+            'download_folder': self.DEFAULT_DOWNLOAD_FOLDER,
+            'download_groups': [
+                {"name": "General", "folder": ""},
+                {"name": "YouTube", "folder": "YouTube"},
+                {"name": "Music", "folder": "Music"},
+            ],
+            'default_format': 'video',
         }
         self.load()
 
@@ -278,6 +289,43 @@ class AppSettings:
         os.makedirs(folder, exist_ok=True)
         return os.path.join(folder, "snippets.json")
 
+    @property
+    def download_folder(self) -> str:
+        return self._settings.get('download_folder', self.DEFAULT_DOWNLOAD_FOLDER)
+
+    @download_folder.setter
+    def download_folder(self, value: str):
+        self._settings['download_folder'] = value
+        self.save()
+
+    @property
+    def download_groups(self) -> list:
+        return self._settings.get('download_groups', [{"name": "General", "folder": ""}])
+
+    @download_groups.setter
+    def download_groups(self, value: list):
+        self._settings['download_groups'] = value
+        self.save()
+
+    @property
+    def default_format(self) -> str:
+        return self._settings.get('default_format', 'video')
+
+    @default_format.setter
+    def default_format(self, value: str):
+        self._settings['default_format'] = value
+        self.save()
+
+    def get_download_path(self, group_name: str = "") -> str:
+        """그룹에 맞는 다운로드 경로 반환"""
+        base = self.download_folder
+        for g in self.download_groups:
+            if g["name"] == group_name and g["folder"]:
+                path = os.path.join(base, g["folder"])
+                os.makedirs(path, exist_ok=True)
+                return path
+        os.makedirs(base, exist_ok=True)
+        return base
 
     def _update_startup_registry(self, enable: bool):
         """Windows 시작 프로그램 레지스트리 등록/해제"""
@@ -937,13 +985,18 @@ class SnippetCard(QFrame):
 
         layout.addLayout(top_layout)
 
-        # 하단: 내용 미리보기
-        preview = self.snippet["content"].replace('\n', ' ')[:25]
-        if len(self.snippet["content"]) > 25:
-            preview += "..."
-        preview_label = QLabel(preview)
+        # 하단: 내용 미리보기 (카드 너비에 맞게 자동 말줄임)
+        preview_text = self.snippet["content"].replace('\n', ' ')
+        preview_label = QLabel(preview_text)
         preview_label.setStyleSheet("color: #94a3b8; font-size: 12px;")
-        preview_label.setMaximumWidth(260)
+        preview_label.setMaximumWidth(280)
+        preview_label.setTextFormat(Qt.TextFormat.PlainText)
+        from PyQt6.QtCore import Qt as QtCore_Qt
+        preview_label.setWordWrap(False)
+        # QFontMetrics로 너비에 맞게 말줄임
+        metrics = preview_label.fontMetrics()
+        elided = metrics.elidedText(preview_text, QtCore_Qt.TextElideMode.ElideRight, 270)
+        preview_label.setText(elided)
         layout.addWidget(preview_label)
 
     def update_style(self):
@@ -1033,7 +1086,7 @@ class QfredApp(QMainWindow):
         title_layout = QHBoxLayout(title_frame)
         title_layout.setContentsMargins(0, 0, 0, 0)
 
-        title = QLabel("Q-fred")
+        title = QLabel("Snippets")
         title.setStyleSheet("font-size: 20px; font-weight: bold; color: #ffffff;")
         title_layout.addWidget(title)
 
@@ -1801,7 +1854,7 @@ class SettingsDialog(QDialog):
     def __init__(self, app_settings, parent=None):
         super().__init__(parent)
         self.app_settings = app_settings
-        self.setWindowTitle("설정")
+        self.setWindowTitle("스니펫 설정")
         self.setFixedSize(500, 520)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowMaximizeButtonHint)
         self.setSizeGripEnabled(False)
@@ -1986,11 +2039,9 @@ class SettingsDialog(QDialog):
         self.file_path_label.setText(f"저장 파일: {os.path.join(folder, 'snippets.json')}")
 
     def save_settings(self):
-        # 앱 설정 저장
         self.app_settings.start_with_windows = self.startup_check.isChecked()
         self.app_settings.start_minimized = self.minimized_check.isChecked()
         self.app_settings.storage_folder = self.folder_input.text()
-
         self.accept()
 
 
@@ -2054,12 +2105,471 @@ class NavButton(QFrame):
         super().mousePressEvent(event)
 
 
+class DownloadWorker(QThread):
+    """yt-dlp 다운로드 워커 스레드"""
+    progress = pyqtSignal(dict)   # {'percent': float, 'speed': str, 'eta': str}
+    finished = pyqtSignal(dict)   # {'success': bool, 'title': str, 'path': str, 'error': str}
+    info_ready = pyqtSignal(dict) # {'title': str, 'duration': str, 'thumbnail': str}
+
+    def __init__(self, url, output_path, audio_only=False):
+        super().__init__()
+        self.url = url
+        self.output_path = output_path
+        self.audio_only = audio_only
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    @staticmethod
+    def _has_ffmpeg():
+        import shutil
+        return shutil.which('ffmpeg') is not None
+
+    def run(self):
+        try:
+            has_ffmpeg = self._has_ffmpeg()
+            ydl_opts = {
+                'outtmpl': os.path.join(self.output_path, '%(title)s.%(ext)s'),
+                'quiet': True,
+                'no_warnings': True,
+                'progress_hooks': [self._progress_hook],
+                'noplaylist': True,
+            }
+
+            if self.audio_only:
+                if has_ffmpeg:
+                    ydl_opts['format'] = 'bestaudio/best'
+                    ydl_opts['postprocessors'] = [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    }]
+                else:
+                    ydl_opts['format'] = 'bestaudio/best'
+            else:
+                if has_ffmpeg:
+                    ydl_opts['format'] = 'bestvideo+bestaudio/best'
+                    ydl_opts['merge_output_format'] = 'mp4'
+                else:
+                    # ffmpeg 없으면 머지 불필요한 단일 포맷
+                    ydl_opts['format'] = 'best'
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                # 먼저 정보 추출
+                info = ydl.extract_info(self.url, download=False)
+                title = info.get('title', 'Unknown')
+                duration = info.get('duration')
+                dur_str = f"{duration // 60}:{duration % 60:02d}" if duration else ""
+                self.info_ready.emit({
+                    'title': title,
+                    'duration': dur_str,
+                    'thumbnail': info.get('thumbnail', ''),
+                })
+
+                if self._cancelled:
+                    self.finished.emit({'success': False, 'title': title, 'path': '', 'error': 'Cancelled'})
+                    return
+
+                # 다운로드 실행
+                ydl.download([self.url])
+
+            if not self._cancelled:
+                self.finished.emit({'success': True, 'title': title, 'path': self.output_path, 'error': ''})
+        except Exception as e:
+            self.finished.emit({'success': False, 'title': '', 'path': '', 'error': str(e)})
+
+    def _progress_hook(self, d):
+        if self._cancelled:
+            raise yt_dlp.utils.DownloadCancelled()
+        if d['status'] == 'downloading':
+            percent = 0.0
+            if d.get('total_bytes'):
+                percent = d.get('downloaded_bytes', 0) / d['total_bytes'] * 100
+            elif d.get('total_bytes_estimate'):
+                percent = d.get('downloaded_bytes', 0) / d['total_bytes_estimate'] * 100
+            speed = d.get('_speed_str', '').strip()
+            eta = d.get('_eta_str', '').strip()
+            self.progress.emit({'percent': percent, 'speed': speed, 'eta': eta})
+        elif d['status'] == 'finished':
+            self.progress.emit({'percent': 100.0, 'speed': '', 'eta': ''})
+
+
+class DownloadItemCard(QFrame):
+    """다운로드 큐 아이템 카드"""
+    cancelClicked = pyqtSignal(str)  # item_id
+
+    def __init__(self, item_id, url, output_path="", parent=None):
+        super().__init__(parent)
+        self.item_id = item_id
+        self.url = url
+        self.output_path = output_path
+        self.setMinimumHeight(72)
+        self.setMaximumHeight(100)
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #1e293b;
+                border: 1px solid #334155;
+                border-radius: 8px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(4)
+
+        # 상단: 제목 + 취소 버튼
+        top = QHBoxLayout()
+        self.title_label = QLabel("정보 가져오는 중...")
+        self.title_label.setStyleSheet("color: #e2e8f0; font-size: 12px; font-weight: bold; border: none; background: transparent;")
+        self.title_label.setMaximumWidth(400)
+        top.addWidget(self.title_label)
+        top.addStretch()
+
+        self.status_label = QLabel("대기")
+        self.status_label.setStyleSheet("color: #94a3b8; font-size: 11px; border: none; background: transparent;")
+        top.addWidget(self.status_label)
+
+        self.cancel_btn = QPushButton("\u2715")
+        self.cancel_btn.setFixedSize(20, 20)
+        self.cancel_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.cancel_btn.setStyleSheet("""
+            QPushButton { background: transparent; border: none; color: #64748b; font-size: 12px; }
+            QPushButton:hover { color: #ef4444; }
+        """)
+        self.cancel_btn.clicked.connect(lambda: self.cancelClicked.emit(self.item_id))
+        top.addWidget(self.cancel_btn)
+        layout.addLayout(top)
+
+        # 하단: 프로그레스바 + 속도
+        bottom = QHBoxLayout()
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setFixedHeight(6)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: #334155;
+                border: none;
+                border-radius: 3px;
+            }
+            QProgressBar::chunk {
+                background-color: #4a946c;
+                border-radius: 3px;
+            }
+        """)
+        bottom.addWidget(self.progress_bar)
+
+        self.speed_label = QLabel("")
+        self.speed_label.setFixedWidth(100)
+        self.speed_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.speed_label.setStyleSheet("color: #64748b; font-size: 10px; border: none; background: transparent;")
+        bottom.addWidget(self.speed_label)
+        layout.addLayout(bottom)
+
+    def set_title(self, title):
+        display = title if len(title) <= 50 else title[:47] + "..."
+        self.title_label.setText(display)
+        self.title_label.setToolTip(title)
+
+    def set_progress(self, percent, speed="", eta=""):
+        self.progress_bar.setValue(int(percent))
+        self.status_label.setText("다운로드 중")
+        self.status_label.setStyleSheet("color: #4a946c; font-size: 11px; border: none; background: transparent;")
+        info = speed
+        if eta:
+            info += f" | {eta}"
+        self.speed_label.setText(info)
+
+    def set_finished(self, success, error=""):
+        self.cancel_btn.hide()
+        if success:
+            self.progress_bar.setValue(100)
+            self.status_label.setText("완료")
+            self.status_label.setStyleSheet("color: #34d399; font-size: 11px; border: none; background: transparent;")
+            self.speed_label.setText("")
+            self.progress_bar.setStyleSheet("""
+                QProgressBar { background-color: #334155; border: none; border-radius: 3px; }
+                QProgressBar::chunk { background-color: #34d399; border-radius: 3px; }
+            """)
+            # 폴더 열기 버튼
+            open_btn = QPushButton("\U0001f4c2 폴더 열기")
+            open_btn.setFixedHeight(24)
+            open_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            open_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #334155; border: none; border-radius: 4px;
+                    color: #94a3b8; font-size: 11px; padding: 0 10px;
+                }
+                QPushButton:hover { background-color: #475569; color: #ffffff; }
+            """)
+            open_btn.clicked.connect(lambda: self._open_folder())
+            self.layout().addWidget(open_btn)
+        else:
+            self.status_label.setText("실패")
+            self.status_label.setStyleSheet("color: #ef4444; font-size: 11px; border: none; background: transparent;")
+            self.speed_label.setText(error[:30] if error else "")
+            self.progress_bar.setStyleSheet("""
+                QProgressBar { background-color: #334155; border: none; border-radius: 3px; }
+                QProgressBar::chunk { background-color: #ef4444; border-radius: 3px; }
+            """)
+
+    def _open_folder(self):
+        path = self.output_path
+        if path and os.path.isdir(path):
+            os.startfile(path)
+
+    def set_cancelled(self):
+        self.cancel_btn.hide()
+        self.status_label.setText("취소됨")
+        self.status_label.setStyleSheet("color: #f59e0b; font-size: 11px; border: none; background: transparent;")
+        self.speed_label.setText("")
+
+
+class DownloaderSettingsDialog(QDialog):
+    """다운로더 전용 설정 다이얼로그"""
+
+    def __init__(self, app_settings, parent=None):
+        super().__init__(parent)
+        self.app_settings = app_settings
+        self.setWindowTitle("다운로더 설정")
+        self.setFixedSize(500, 480)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowMaximizeButtonHint)
+        self.setSizeGripEnabled(False)
+        self.setStyleSheet("""
+            QDialog { background-color: #0f172a; }
+            QLabel { color: #e2e8f0; }
+            QLineEdit {
+                background-color: #1e293b; border: 1px solid #334155;
+                border-radius: 6px; padding: 8px 12px; color: #ffffff;
+                font-size: 13px; min-height: 20px;
+            }
+            QLineEdit:focus { border-color: #4a946c; }
+            QPushButton {
+                background-color: #334155; border: none; border-radius: 6px;
+                padding: 10px 20px; color: #ffffff; font-size: 13px; min-height: 20px;
+            }
+            QPushButton:hover { background-color: #475569; }
+        """)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 28, 28, 24)
+        layout.setSpacing(8)
+
+        title = QLabel("다운로더 설정")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffffff;")
+        layout.addWidget(title)
+        layout.addSpacing(8)
+
+        # 다운로드 폴더
+        fl = QLabel("다운로드 저장 폴더")
+        fl.setStyleSheet("font-size: 12px; color: #94a3b8;")
+        layout.addWidget(fl)
+        layout.addSpacing(4)
+
+        ff = QFrame()
+        ff.setStyleSheet("QFrame { background: transparent; }")
+        ffl = QHBoxLayout(ff)
+        ffl.setContentsMargins(0, 0, 0, 0)
+        ffl.setSpacing(8)
+
+        self.dl_folder_input = QLineEdit()
+        self.dl_folder_input.setText(self.app_settings.download_folder)
+        self.dl_folder_input.setFixedHeight(38)
+        self.dl_folder_input.setReadOnly(True)
+        ffl.addWidget(self.dl_folder_input)
+
+        browse_btn = QPushButton("찾아보기")
+        browse_btn.setFixedSize(100, 38)
+        browse_btn.clicked.connect(self._browse_folder)
+        ffl.addWidget(browse_btn)
+        layout.addWidget(ff)
+        layout.addSpacing(16)
+
+        # 구분선
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setStyleSheet("background-color: #334155;")
+        line.setFixedHeight(1)
+        layout.addWidget(line)
+        layout.addSpacing(16)
+
+        # 그룹 관리
+        gl = QLabel("다운로드 그룹")
+        gl.setStyleSheet("font-size: 12px; color: #94a3b8;")
+        layout.addWidget(gl)
+        gd = QLabel("그룹별 하위 폴더에 다운로드가 저장됩니다")
+        gd.setStyleSheet("font-size: 11px; color: #64748b;")
+        layout.addWidget(gd)
+        layout.addSpacing(4)
+
+        self.group_list = QListWidget()
+        self.group_list.setFixedHeight(100)
+        self.group_list.setStyleSheet("""
+            QListWidget {
+                background-color: #1e293b; border: 1px solid #334155;
+                border-radius: 6px; color: #ffffff; font-size: 12px; padding: 4px;
+            }
+            QListWidget::item { padding: 2px 4px; }
+            QListWidget::item:selected { background-color: #334155; }
+            QScrollBar:vertical {
+                background: transparent;
+                width: 10px;
+                border: none;
+                margin: 0px;
+                padding: 2px;
+            }
+            QScrollBar::handle:vertical {
+                background: #475569;
+                border: 2px solid #1e293b;
+                border-radius: 5px;
+                min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #64748b;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px; border: none;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+        """)
+        for g in self.app_settings.download_groups:
+            self.group_list.addItem(f"{g['name']}  \u2192  {g['folder'] or '(\ub8e8\ud2b8)'}")
+        layout.addWidget(self.group_list)
+
+        # 그룹 추가/삭제
+        gbl = QHBoxLayout()
+        gbl.setSpacing(8)
+
+        self.grp_name_input = QLineEdit()
+        self.grp_name_input.setPlaceholderText("그룹 이름")
+        self.grp_name_input.setFixedHeight(32)
+        self.grp_name_input.setStyleSheet("min-height: 16px; font-size: 12px;")
+        gbl.addWidget(self.grp_name_input)
+
+        self.grp_folder_input = QLineEdit()
+        self.grp_folder_input.setPlaceholderText("폴더명")
+        self.grp_folder_input.setFixedHeight(32)
+        self.grp_folder_input.setFixedWidth(100)
+        self.grp_folder_input.setStyleSheet("min-height: 16px; font-size: 12px;")
+        gbl.addWidget(self.grp_folder_input)
+
+        add_btn = QPushButton("+")
+        add_btn.setFixedSize(32, 32)
+        add_btn.setStyleSheet("min-height: 16px; font-size: 14px; font-weight: bold;")
+        add_btn.clicked.connect(self._add_group)
+        gbl.addWidget(add_btn)
+
+        del_btn = QPushButton("-")
+        del_btn.setFixedSize(32, 32)
+        del_btn.setStyleSheet("min-height: 16px; font-size: 14px; font-weight: bold;")
+        del_btn.clicked.connect(self._del_group)
+        gbl.addWidget(del_btn)
+
+        layout.addLayout(gbl)
+        layout.addStretch()
+
+        # 버튼 영역
+        btn_frame = QFrame()
+        btn_frame.setStyleSheet("QFrame { background: transparent; }")
+        btn_layout = QHBoxLayout(btn_frame)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(12)
+        btn_layout.addStretch()
+
+        save_btn = QPushButton("저장")
+        save_btn.setFixedSize(100, 40)
+        save_btn.setStyleSheet("""
+            QPushButton { background-color: #4a946c; font-weight: bold; min-height: 20px; }
+            QPushButton:hover { background-color: #5db684; }
+        """)
+        save_btn.clicked.connect(self._save)
+        btn_layout.addWidget(save_btn)
+
+        cancel_btn = QPushButton("취소")
+        cancel_btn.setFixedSize(100, 40)
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+
+        layout.addWidget(btn_frame)
+
+    def _browse_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "다운로드 저장 폴더 선택", self.dl_folder_input.text())
+        if folder:
+            self.dl_folder_input.setText(folder)
+
+    def _add_group(self):
+        name = self.grp_name_input.text().strip()
+        folder = self.grp_folder_input.text().strip() or name
+        if not name:
+            return
+        self.group_list.addItem(f"{name}  \u2192  {folder or '(\ub8e8\ud2b8)'}")
+        self.grp_name_input.clear()
+        self.grp_folder_input.clear()
+
+    def _del_group(self):
+        row = self.group_list.currentRow()
+        if row >= 0:
+            self.group_list.takeItem(row)
+
+    def _save(self):
+        self.app_settings.download_folder = self.dl_folder_input.text()
+        groups = []
+        for i in range(self.group_list.count()):
+            text = self.group_list.item(i).text()
+            parts = text.split("\u2192")
+            name = parts[0].strip()
+            folder = parts[1].strip() if len(parts) > 1 else ""
+            if folder == "(\ub8e8\ud2b8)":
+                folder = ""
+            groups.append({"name": name, "folder": folder})
+        self.app_settings.download_groups = groups
+        self.accept()
+
+
 class DownloaderPage(QWidget):
     """다운로더 페이지"""
 
-    def __init__(self, parent=None):
+    COMBO_STYLE = """
+        QComboBox {
+            background-color: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            color: #ffffff;
+            font-size: 12px;
+            padding: 4px 8px;
+            min-height: 28px;
+        }
+        QComboBox:hover { border-color: #4a946c; }
+        QComboBox::drop-down {
+            border: none;
+            width: 20px;
+        }
+        QComboBox::down-arrow {
+            image: none;
+            border: none;
+        }
+        QComboBox QAbstractItemView {
+            background-color: #1e293b;
+            border: 1px solid #334155;
+            color: #ffffff;
+            selection-background-color: #334155;
+        }
+    """
+
+    def __init__(self, app_settings=None, parent=None):
         super().__init__(parent)
+        self.app_settings = app_settings
         self.setStyleSheet("background-color: #0f172a;")
+        self.workers = {}  # item_id -> DownloadWorker
+        self.cards = {}    # item_id -> DownloadItemCard
+        self.queue_count = 0
+        self.empty_widget = None
         self.setup_ui()
 
     def setup_ui(self):
@@ -2067,14 +2577,59 @@ class DownloaderPage(QWidget):
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(16)
 
-        # 헤더
+        # 헤더 + 설정 버튼
+        header_layout = QHBoxLayout()
         header = QLabel("Downloader")
         header.setStyleSheet("font-size: 20px; font-weight: bold; color: #ffffff;")
-        layout.addWidget(header)
+        header_layout.addWidget(header)
+        header_layout.addStretch()
 
-        subtitle = QLabel("URL을 입력하면 미디어를 다운로드합니다")
+        settings_btn = QPushButton("\u2699")
+        settings_btn.setFixedSize(32, 32)
+        settings_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent; border: none;
+                color: #94a3b8; font-size: 18px; border-radius: 6px;
+            }
+            QPushButton:hover { background-color: #334155; color: #ffffff; }
+        """)
+        settings_btn.clicked.connect(self._open_settings)
+        header_layout.addWidget(settings_btn)
+        layout.addLayout(header_layout)
+
+        subtitle = QLabel("YouTube, Instagram, TikTok 등 URL을 입력하면 미디어를 다운로드합니다")
         subtitle.setStyleSheet("font-size: 12px; color: #94a3b8;")
         layout.addWidget(subtitle)
+
+        # 옵션 바: 형식 + 그룹
+        opt_layout = QHBoxLayout()
+        opt_layout.setSpacing(8)
+
+        fmt_label = QLabel("형식")
+        fmt_label.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        opt_layout.addWidget(fmt_label)
+
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(["영상 (MP4)", "오디오 (MP3)"])
+        self.format_combo.setFixedWidth(130)
+        self.format_combo.setStyleSheet(self.COMBO_STYLE)
+        opt_layout.addWidget(self.format_combo)
+
+        opt_layout.addSpacing(12)
+
+        grp_label = QLabel("그룹")
+        grp_label.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        opt_layout.addWidget(grp_label)
+
+        self.group_combo = QComboBox()
+        self.group_combo.setFixedWidth(150)
+        self.group_combo.setStyleSheet(self.COMBO_STYLE)
+        self._refresh_groups()
+        opt_layout.addWidget(self.group_combo)
+
+        opt_layout.addStretch()
+        layout.addLayout(opt_layout)
 
         # URL 입력 바
         url_frame = QFrame()
@@ -2089,7 +2644,7 @@ class DownloaderPage(QWidget):
         url_layout.setContentsMargins(12, 4, 4, 4)
         url_layout.setSpacing(8)
 
-        link_icon = QLabel("🔗")
+        link_icon = QLabel("\U0001f517")
         link_icon.setStyleSheet("font-size: 16px; background: transparent; border: none;")
         url_layout.addWidget(link_icon)
 
@@ -2104,9 +2659,10 @@ class DownloaderPage(QWidget):
                 padding: 8px 0;
             }
         """)
+        self.url_input.returnPressed.connect(self.on_download)
         url_layout.addWidget(self.url_input)
 
-        dl_btn = QPushButton("⬇  Download")
+        dl_btn = QPushButton("\u2b07  Download")
         dl_btn.setFixedHeight(36)
         dl_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         dl_btn.setStyleSheet("""
@@ -2123,6 +2679,7 @@ class DownloaderPage(QWidget):
                 background-color: #5db684;
             }
         """)
+        dl_btn.clicked.connect(self.on_download)
         url_layout.addWidget(dl_btn)
 
         layout.addWidget(url_frame)
@@ -2166,19 +2723,19 @@ class DownloaderPage(QWidget):
         self.queue_layout.setSpacing(8)
 
         # 빈 상태 표시
-        empty = QFrame()
-        empty.setStyleSheet("""
+        self.empty_widget = QFrame()
+        self.empty_widget.setStyleSheet("""
             QFrame {
                 background-color: #1e293b;
                 border: 1px dashed #334155;
                 border-radius: 12px;
             }
         """)
-        el = QVBoxLayout(empty)
+        el = QVBoxLayout(self.empty_widget)
         el.setContentsMargins(40, 60, 40, 60)
         el.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        ei = QLabel("⬇")
+        ei = QLabel("\u2b07")
         ei.setAlignment(Qt.AlignmentFlag.AlignCenter)
         ei.setStyleSheet("font-size: 36px; color: #334155; background: transparent; border: none;")
         el.addWidget(ei)
@@ -2193,7 +2750,7 @@ class DownloaderPage(QWidget):
         eh.setStyleSheet("font-size: 11px; color: #334155; background: transparent; border: none;")
         el.addWidget(eh)
 
-        self.queue_layout.addWidget(empty)
+        self.queue_layout.addWidget(self.empty_widget)
         self.queue_layout.addStretch()
 
         scroll.setWidget(queue_w)
@@ -2212,21 +2769,107 @@ class DownloaderPage(QWidget):
         sl = QHBoxLayout(status)
         sl.setContentsMargins(12, 0, 12, 0)
 
-        sd = QLabel("●")
-        sd.setStyleSheet("color: #64748b; font-size: 8px; border: none; background: transparent;")
-        sl.addWidget(sd)
+        self.status_dot = QLabel("\u25cf")
+        self.status_dot.setStyleSheet("color: #64748b; font-size: 8px; border: none; background: transparent;")
+        sl.addWidget(self.status_dot)
 
-        st = QLabel("대기 중")
-        st.setStyleSheet("color: #94a3b8; font-size: 11px; border: none; background: transparent;")
-        sl.addWidget(st)
+        self.status_text = QLabel("대기 중")
+        self.status_text.setStyleSheet("color: #94a3b8; font-size: 11px; border: none; background: transparent;")
+        sl.addWidget(self.status_text)
 
         sl.addStretch()
 
-        sp = QLabel("저장: ~/Downloads")
-        sp.setStyleSheet("color: #64748b; font-size: 11px; border: none; background: transparent;")
-        sl.addWidget(sp)
+        dl_folder = self.app_settings.download_folder if self.app_settings else "~/Downloads"
+        self.path_label = QLabel(f"저장: {dl_folder}")
+        self.path_label.setStyleSheet("color: #64748b; font-size: 11px; border: none; background: transparent;")
+        sl.addWidget(self.path_label)
 
         layout.addWidget(status)
+
+    def _refresh_groups(self):
+        self.group_combo.clear()
+        if self.app_settings:
+            for g in self.app_settings.download_groups:
+                self.group_combo.addItem(g["name"])
+        else:
+            self.group_combo.addItem("General")
+
+    def on_download(self):
+        url = self.url_input.text().strip()
+        if not url:
+            return
+
+        self.url_input.clear()
+
+        # 빈 상태 위젯 숨기기
+        if self.empty_widget and self.empty_widget.isVisible():
+            self.empty_widget.hide()
+
+        # 형식 & 그룹
+        audio_only = self.format_combo.currentIndex() == 1
+        group_name = self.group_combo.currentText()
+
+        # 저장 경로
+        if self.app_settings:
+            output_path = self.app_settings.get_download_path(group_name)
+        else:
+            output_path = os.path.join(os.path.expanduser('~'), 'Downloads')
+
+        # 아이템 ID
+        item_id = str(uuid.uuid4())[:8]
+
+        # 카드 생성
+        card = DownloadItemCard(item_id, url, output_path=output_path)
+        card.cancelClicked.connect(self.on_cancel)
+        self.queue_layout.insertWidget(self.queue_layout.count() - 1, card)
+        self.cards[item_id] = card
+
+        # 카운트 업데이트
+        self.queue_count += 1
+        self.q_count.setText(str(self.queue_count))
+
+        # 상태 바 업데이트
+        self.status_dot.setStyleSheet("color: #4a946c; font-size: 8px; border: none; background: transparent;")
+        self.status_text.setText("다운로드 중...")
+        self.path_label.setText(f"저장: {output_path}")
+
+        # 워커 시작
+        worker = DownloadWorker(url, output_path, audio_only)
+        worker.info_ready.connect(lambda info, c=card: c.set_title(info['title']))
+        worker.progress.connect(lambda p, c=card: c.set_progress(p['percent'], p.get('speed', ''), p.get('eta', '')))
+        worker.finished.connect(lambda r, iid=item_id: self._on_finished(iid, r))
+        self.workers[item_id] = worker
+        worker.start()
+
+    def on_cancel(self, item_id):
+        worker = self.workers.get(item_id)
+        if worker:
+            worker.cancel()
+        card = self.cards.get(item_id)
+        if card:
+            card.set_cancelled()
+
+    def _on_finished(self, item_id, result):
+        card = self.cards.get(item_id)
+        if card:
+            card.set_finished(result['success'], result.get('error', ''))
+
+        # 워커 정리
+        worker = self.workers.pop(item_id, None)
+        if worker:
+            worker.deleteLater()
+
+        # 활성 다운로드가 없으면 상태 복원
+        active = any(w.isRunning() for w in self.workers.values())
+        if not active:
+            self.status_dot.setStyleSheet("color: #64748b; font-size: 8px; border: none; background: transparent;")
+            self.status_text.setText("대기 중")
+
+    def _open_settings(self):
+        dialog = DownloaderSettingsDialog(self.app_settings, self)
+        if dialog.exec():
+            self._refresh_groups()
+            self.path_label.setText(f"저장: {self.app_settings.download_folder}")
 
 
 class MainShell(QMainWindow):
@@ -2273,17 +2916,18 @@ class MainShell(QMainWindow):
         nav_layout.setContentsMargins(0, 8, 0, 12)
         nav_layout.setSpacing(2)
 
-        # Q 로고
-        q_logo = QLabel("Q")
+        # Q 로고 이미지
+        q_logo = QLabel()
         q_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        q_logo.setFixedHeight(32)
-        q_logo.setStyleSheet("""
-            color: #4a946c;
-            font-size: 18px;
-            font-weight: bold;
-            background: transparent;
-            border: none;
-        """)
+        q_logo.setFixedHeight(36)
+        q_logo.setStyleSheet("background: transparent; border: none;")
+        logo_img_path = os.path.join(RESOURCE_DIR, "q_logo.png")
+        if os.path.exists(logo_img_path):
+            pixmap = QPixmap(logo_img_path).scaled(28, 28, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            q_logo.setPixmap(pixmap)
+        else:
+            q_logo.setText("Q")
+            q_logo.setStyleSheet("color: #4a946c; font-size: 18px; font-weight: bold; background: transparent; border: none;")
         nav_layout.addWidget(q_logo)
 
         sep = QFrame()
@@ -2312,7 +2956,7 @@ class MainShell(QMainWindow):
         self.page_stack = QStackedWidget()
         self.page_stack.addWidget(qfred_widget)
 
-        self.downloader = DownloaderPage()
+        self.downloader = DownloaderPage(app_settings=self.app_settings)
         self.page_stack.addWidget(self.downloader)
 
         main_layout.addWidget(self.page_stack, 1)
