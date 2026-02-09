@@ -27,7 +27,7 @@ from pynput import keyboard as pynput_keyboard
 from pynput.keyboard import Key, Controller
 
 # 앱 버전
-APP_VERSION = "1.0.22"
+APP_VERSION = "1.0.23"
 APP_NAME = "Q-fred"
 GITHUB_REPO = "dumock/Qfred"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -2156,7 +2156,7 @@ class DownloadWorker(QThread):
                 info = ydl.extract_info(self.url, download=False)
                 title = info.get('title', 'Unknown')
                 duration = info.get('duration')
-                dur_str = f"{duration // 60}:{duration % 60:02d}" if duration else ""
+                dur_str = f"{int(duration) // 60}:{int(duration) % 60:02d}" if duration else ""
                 self.info_ready.emit({
                     'title': title,
                     'duration': dur_str,
