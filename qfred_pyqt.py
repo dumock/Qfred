@@ -27,7 +27,7 @@ from pynput import keyboard as pynput_keyboard
 from pynput.keyboard import Key, Controller
 
 # 앱 버전
-APP_VERSION = "1.0.20"
+APP_VERSION = "1.0.21"
 APP_NAME = "Q-fred"
 GITHUB_REPO = "dumock/Qfred"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -2197,7 +2197,7 @@ class DouyinDownloadWorker(QThread):
     finished = pyqtSignal(dict)
     info_ready = pyqtSignal(dict)
 
-    WORKER_API = "https://service.tubiq.net"
+    WORKER_API = "https://douyin.tubiq.net"
 
     def __init__(self, url, output_path):
         super().__init__()
@@ -2993,7 +2993,7 @@ class MainShell(QMainWindow):
         self.setMinimumSize(964, 550)
         self.resize(1020, 600)
 
-        logo_path = os.path.join(APP_DIR, "q_logo_hd.ico")
+        logo_path = os.path.join(RESOURCE_DIR, "q_logo_hd.ico")
         if os.path.exists(logo_path):
             self.setWindowIcon(QIcon(logo_path))
 
@@ -3088,7 +3088,7 @@ class MainShell(QMainWindow):
 
     def setup_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
-        logo_path = os.path.join(APP_DIR, "q_logo_hd.ico")
+        logo_path = os.path.join(RESOURCE_DIR, "q_logo_hd.ico")
         if os.path.exists(logo_path):
             self.tray_icon.setIcon(QIcon(logo_path))
 
