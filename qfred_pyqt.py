@@ -1994,6 +1994,414 @@ class SettingsDialog(QDialog):
         self.accept()
 
 
+class NavButton(QFrame):
+    """네비게이션 바 버튼"""
+    clicked = pyqtSignal()
+
+    def __init__(self, icon_text, label_text, parent=None):
+        super().__init__(parent)
+        self._active = False
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.setFixedSize(64, 52)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 6, 0, 4)
+        layout.setSpacing(1)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.icon_lbl = QLabel(icon_text)
+        self.icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.icon_lbl)
+
+        self.text_lbl = QLabel(label_text)
+        self.text_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.text_lbl)
+
+        self._update_style()
+
+    @property
+    def active(self):
+        return self._active
+
+    @active.setter
+    def active(self, value):
+        self._active = value
+        self._update_style()
+
+    def _update_style(self):
+        if self._active:
+            self.setStyleSheet("QFrame { background-color: #1e293b; border: none; border-left: 3px solid #4a946c; }")
+            color = "#e2e8f0"
+        else:
+            self.setStyleSheet("QFrame { background-color: transparent; border: none; border-left: 3px solid transparent; }")
+            color = "#64748b"
+        self.icon_lbl.setStyleSheet(f"color: {color}; font-size: 18px; background: transparent; border: none;")
+        self.text_lbl.setStyleSheet(f"color: {color}; font-size: 9px; background: transparent; border: none;")
+
+    def enterEvent(self, event):
+        if not self._active:
+            self.setStyleSheet("QFrame { background-color: #1e293b; border: none; border-left: 3px solid transparent; }")
+            self.icon_lbl.setStyleSheet("color: #94a3b8; font-size: 18px; background: transparent; border: none;")
+            self.text_lbl.setStyleSheet("color: #94a3b8; font-size: 9px; background: transparent; border: none;")
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._update_style()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        self.clicked.emit()
+        super().mousePressEvent(event)
+
+
+class DownloaderPage(QWidget):
+    """다운로더 페이지"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("background-color: #0f172a;")
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(16)
+
+        # 헤더
+        header = QLabel("Downloader")
+        header.setStyleSheet("font-size: 20px; font-weight: bold; color: #ffffff;")
+        layout.addWidget(header)
+
+        subtitle = QLabel("URL을 입력하면 미디어를 다운로드합니다")
+        subtitle.setStyleSheet("font-size: 12px; color: #94a3b8;")
+        layout.addWidget(subtitle)
+
+        # URL 입력 바
+        url_frame = QFrame()
+        url_frame.setStyleSheet("""
+            QFrame {
+                background-color: #1e293b;
+                border: 1px solid #334155;
+                border-radius: 8px;
+            }
+        """)
+        url_layout = QHBoxLayout(url_frame)
+        url_layout.setContentsMargins(12, 4, 4, 4)
+        url_layout.setSpacing(8)
+
+        link_icon = QLabel("🔗")
+        link_icon.setStyleSheet("font-size: 16px; background: transparent; border: none;")
+        url_layout.addWidget(link_icon)
+
+        self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText("URL을 입력하세요...")
+        self.url_input.setStyleSheet("""
+            QLineEdit {
+                background-color: transparent;
+                border: none;
+                color: #ffffff;
+                font-size: 14px;
+                padding: 8px 0;
+            }
+        """)
+        url_layout.addWidget(self.url_input)
+
+        dl_btn = QPushButton("⬇  Download")
+        dl_btn.setFixedHeight(36)
+        dl_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        dl_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4a946c;
+                border: none;
+                border-radius: 6px;
+                color: #ffffff;
+                font-size: 13px;
+                font-weight: bold;
+                padding: 0 20px;
+            }
+            QPushButton:hover {
+                background-color: #5db684;
+            }
+        """)
+        url_layout.addWidget(dl_btn)
+
+        layout.addWidget(url_frame)
+
+        # 다운로드 큐 헤더
+        q_header = QHBoxLayout()
+        q_label = QLabel("DOWNLOAD QUEUE")
+        q_label.setStyleSheet("font-size: 10px; font-weight: bold; color: #64748b;")
+        q_header.addWidget(q_label)
+        q_header.addStretch()
+        self.q_count = QLabel("0")
+        self.q_count.setFixedSize(22, 22)
+        self.q_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.q_count.setStyleSheet("""
+            background-color: #1e293b; color: #64748b;
+            border-radius: 11px; font-size: 10px; font-weight: bold;
+        """)
+        q_header.addWidget(self.q_count)
+        layout.addLayout(q_header)
+
+        # 다운로드 큐 리스트 (스크롤)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("""
+            QScrollArea { background-color: transparent; border: none; }
+            QScrollBar:vertical {
+                background-color: transparent; width: 6px; margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #334155; border-radius: 3px; min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover { background-color: #475569; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+        """)
+
+        queue_w = QWidget()
+        self.queue_layout = QVBoxLayout(queue_w)
+        self.queue_layout.setContentsMargins(0, 0, 0, 0)
+        self.queue_layout.setSpacing(8)
+
+        # 빈 상태 표시
+        empty = QFrame()
+        empty.setStyleSheet("""
+            QFrame {
+                background-color: #1e293b;
+                border: 1px dashed #334155;
+                border-radius: 12px;
+            }
+        """)
+        el = QVBoxLayout(empty)
+        el.setContentsMargins(40, 60, 40, 60)
+        el.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        ei = QLabel("⬇")
+        ei.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ei.setStyleSheet("font-size: 36px; color: #334155; background: transparent; border: none;")
+        el.addWidget(ei)
+
+        et = QLabel("다운로드 대기열이 비어있습니다")
+        et.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        et.setStyleSheet("font-size: 13px; color: #475569; background: transparent; border: none;")
+        el.addWidget(et)
+
+        eh = QLabel("위 입력창에 URL을 붙여넣고 다운로드 버튼을 누르세요")
+        eh.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        eh.setStyleSheet("font-size: 11px; color: #334155; background: transparent; border: none;")
+        el.addWidget(eh)
+
+        self.queue_layout.addWidget(empty)
+        self.queue_layout.addStretch()
+
+        scroll.setWidget(queue_w)
+        layout.addWidget(scroll, 1)
+
+        # 하단 상태 바
+        status = QFrame()
+        status.setFixedHeight(36)
+        status.setStyleSheet("""
+            QFrame {
+                background-color: #1e293b;
+                border: 1px solid #334155;
+                border-radius: 6px;
+            }
+        """)
+        sl = QHBoxLayout(status)
+        sl.setContentsMargins(12, 0, 12, 0)
+
+        sd = QLabel("●")
+        sd.setStyleSheet("color: #64748b; font-size: 8px; border: none; background: transparent;")
+        sl.addWidget(sd)
+
+        st = QLabel("대기 중")
+        st.setStyleSheet("color: #94a3b8; font-size: 11px; border: none; background: transparent;")
+        sl.addWidget(st)
+
+        sl.addStretch()
+
+        sp = QLabel("저장: ~/Downloads")
+        sp.setStyleSheet("color: #64748b; font-size: 11px; border: none; background: transparent;")
+        sl.addWidget(sp)
+
+        layout.addWidget(status)
+
+
+class MainShell(QMainWindow):
+    """메인 셸 - 왼쪽 네비게이션 바 + 콘텐츠 페이지"""
+
+    def __init__(self, manager, engine, app_settings):
+        super().__init__()
+        self.manager = manager
+        self.engine = engine
+        self.app_settings = app_settings
+
+        self.setWindowTitle("Q-fred")
+        self.setMinimumSize(964, 550)
+        self.resize(1020, 600)
+
+        logo_path = os.path.join(APP_DIR, "q_logo_hd.ico")
+        if os.path.exists(logo_path):
+            self.setWindowIcon(QIcon(logo_path))
+
+        # QfredApp 생성 (UI 위젯만 사용, 창은 표시하지 않음)
+        self.qfred = QfredApp(manager, engine, app_settings)
+        self.qfred.tray_icon.hide()
+        qfred_widget = self.qfred.centralWidget()
+
+        # 셸 UI
+        central = QWidget()
+        central.setStyleSheet("background-color: #0f172a;")
+        self.setCentralWidget(central)
+
+        main_layout = QHBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # ===== 왼쪽 네비게이션 바 =====
+        nav = QFrame()
+        nav.setFixedWidth(64)
+        nav.setStyleSheet("""
+            QFrame {
+                background-color: #0b1120;
+                border-right: 1px solid #1e293b;
+            }
+        """)
+        nav_layout = QVBoxLayout(nav)
+        nav_layout.setContentsMargins(0, 8, 0, 12)
+        nav_layout.setSpacing(2)
+
+        # Q 로고
+        q_logo = QLabel("Q")
+        q_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        q_logo.setFixedHeight(32)
+        q_logo.setStyleSheet("""
+            color: #4a946c;
+            font-size: 18px;
+            font-weight: bold;
+            background: transparent;
+            border: none;
+        """)
+        nav_layout.addWidget(q_logo)
+
+        sep = QFrame()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet("background-color: #1e293b; border: none;")
+        nav_layout.addWidget(sep)
+        nav_layout.addSpacing(8)
+
+        self.nav_buttons = []
+
+        snippets_btn = NavButton("⚡", "Snippets")
+        snippets_btn.clicked.connect(lambda: self.switch_page(0))
+        nav_layout.addWidget(snippets_btn)
+        self.nav_buttons.append(snippets_btn)
+
+        download_btn = NavButton("⬇", "Download")
+        download_btn.clicked.connect(lambda: self.switch_page(1))
+        nav_layout.addWidget(download_btn)
+        self.nav_buttons.append(download_btn)
+
+        nav_layout.addStretch()
+
+        main_layout.addWidget(nav)
+
+        # ===== 콘텐츠 페이지 스택 =====
+        self.page_stack = QStackedWidget()
+        self.page_stack.addWidget(qfred_widget)
+
+        self.downloader = DownloaderPage()
+        self.page_stack.addWidget(self.downloader)
+
+        main_layout.addWidget(self.page_stack, 1)
+
+        # 트레이 아이콘 설정
+        self.setup_tray()
+
+        # 기본 페이지: Snippets
+        self.switch_page(0)
+
+    def switch_page(self, index):
+        self.page_stack.setCurrentIndex(index)
+        for i, btn in enumerate(self.nav_buttons):
+            btn.active = (i == index)
+
+    def setup_tray(self):
+        self.tray_icon = QSystemTrayIcon(self)
+        logo_path = os.path.join(APP_DIR, "q_logo_hd.ico")
+        if os.path.exists(logo_path):
+            self.tray_icon.setIcon(QIcon(logo_path))
+
+        tray_menu = QMenu()
+        show_action = QAction("열기", self)
+        show_action.triggered.connect(self.show_window)
+        tray_menu.addAction(show_action)
+        tray_menu.addSeparator()
+        quit_action = QAction("종료", self)
+        quit_action.triggered.connect(self.quit_app)
+        tray_menu.addAction(quit_action)
+
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self.on_tray_activated)
+        self.tray_icon.setToolTip("Q-fred")
+        self.tray_icon.show()
+
+    def on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.show_window()
+
+    def show_window(self):
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def closeEvent(self, event):
+        event.ignore()
+        self.hide()
+
+    def quit_app(self):
+        self.engine.stop()
+        self.tray_icon.hide()
+        QApplication.quit()
+
+    def show_update_notification(self, latest_ver, download_url):
+        QTimer.singleShot(0, lambda: self._show_update_dialog(latest_ver, download_url))
+
+    def _show_update_dialog(self, latest_ver, download_url):
+        if not download_url:
+            return
+        reply = QMessageBox.question(
+            self, 'Q-fred 업데이트',
+            f"새 버전 {latest_ver}이(가) 있습니다.\n현재 버전: {APP_VERSION}\n\n업데이트 하시겠습니까?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        progress = QMessageBox(self)
+        progress.setWindowTitle("업데이트")
+        progress.setText("다운로드 중... 0%")
+        progress.setStandardButtons(QMessageBox.StandardButton.NoButton)
+        progress.show()
+        QApplication.processEvents()
+
+        def on_progress(percent):
+            progress.setText(f"다운로드 중... {percent}%")
+            QApplication.processEvents()
+
+        update_path = download_update(download_url, progress_callback=on_progress)
+        progress.close()
+
+        if update_path:
+            QMessageBox.information(self, '업데이트', '다운로드 완료! 앱을 재시작합니다.')
+            self.engine.stop()
+            self.tray_icon.hide()
+            apply_update(update_path)
+        else:
+            QMessageBox.warning(self, '업데이트 실패', '다운로드에 실패했습니다.\n나중에 다시 시도해주세요.')
+
+
 def main():
     # 중복 실행 방지
     import tempfile
@@ -2031,12 +2439,11 @@ def main():
     manager = SnippetManager(snippets_file=app_settings.snippets_file)
     engine = SnippetEngine(manager)
 
-    # GUI 생성
-    window = QfredApp(manager, engine, app_settings=app_settings)
+    # MainShell로 감싸서 네비게이션 바 추가
+    window = MainShell(manager, engine, app_settings)
 
     # 트레이 모드: 설정에 따라 창 표시 여부 결정
     if app_settings.start_minimized:
-        # 트레이로만 시작 (창 숨김)
         window.hide()
     else:
         window.show()
