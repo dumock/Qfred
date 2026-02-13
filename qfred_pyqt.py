@@ -201,10 +201,13 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QTextEdit, QPushButton, QListWidget, QListWidgetItem,
     QFrame, QScrollArea, QSystemTrayIcon, QMenu, QSplitter, QMessageBox,
     QSizePolicy, QStackedWidget, QSpacerItem, QDialog, QFileDialog, QCheckBox,
-    QComboBox, QProgressBar
+    QComboBox, QProgressBar, QGridLayout, QSlider
 )
-from PyQt6.QtCore import Qt, QSize, pyqtSignal, QObject, QTimer, QEvent, QThread
-from PyQt6.QtGui import QIcon, QPixmap, QFont, QColor, QPalette, QAction, QFontDatabase, QCursor
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QObject, QTimer, QEvent, QThread, QPoint
+from PyQt6.QtGui import (
+    QIcon, QPixmap, QFont, QColor, QPalette, QAction, QFontDatabase, QCursor,
+    QImage, QPainter, QPen, QBrush
+)
 
 # 설정 파일 경로
 # PyInstaller exe로 실행 시 exe 파일 위치, 스크립트 실행 시 스크립트 위치 사용
@@ -3009,6 +3012,1752 @@ class DownloaderPage(QWidget):
             self.path_label.setText(f"저장: {self.app_settings.download_folder}")
 
 
+class ColorPickerPage(QWidget):
+    """컬러 픽커 페이지 - 스포이드로 화면 색상 추출"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._picked_color = QColor("#6c5ce7")
+        self._history: list[str] = []
+        self._is_picking = False
+        self._init_ui()
+
+    @staticmethod
+    def _svg_to_pixmap(svg_str: str, size: int) -> 'QPixmap':
+        from PyQt6.QtSvg import QSvgRenderer
+        from PyQt6.QtGui import QPixmap, QPainter
+        renderer = QSvgRenderer(svg_str.strip().encode())
+        pix = QPixmap(size, size)
+        pix.fill(QColor(0, 0, 0, 0))
+        p = QPainter(pix)
+        renderer.render(p)
+        p.end()
+        return pix
+
+    _EYEDROPPER_SVG = """<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M21.17 2.83a2.83 2.83 0 0 0-4 0l-2.12 2.12-1.42-1.42-1.41 1.42 1.41 1.41-7.78 7.78a2 2 0 0 0-.59 1.42V18h2.44a2 2 0 0 0 1.42-.59l7.78-7.78 1.41 1.41 1.42-1.41-1.42-1.42 2.12-2.12a2.83 2.83 0 0 0 0-4Z"
+            stroke="{color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+      <path d="M2 22l3-3" stroke="{color}" stroke-width="1.8" stroke-linecap="round"/>
+    </svg>"""
+
+    _PALETTE_DATA = {
+        'tailwind': [
+            ('#ef4444','Red'),('#f97316','Orange'),('#f59e0b','Amber'),('#eab308','Yellow'),
+            ('#84cc16','Lime'),('#22c55e','Green'),('#10b981','Emerald'),('#14b8a6','Teal'),
+            ('#06b6d4','Cyan'),('#0ea5e9','Sky'),('#3b82f6','Blue'),('#6366f1','Indigo'),
+            ('#8b5cf6','Violet'),('#a855f7','Purple'),('#d946ef','Fuchsia'),('#ec4899','Pink'),
+            ('#f43f5e','Rose'),('#64748b','Slate'),('#6b7280','Gray'),('#78716c','Stone'),
+        ],
+        'material': [
+            ('#F44336','Red'),('#E91E63','Pink'),('#9C27B0','Purple'),('#673AB7','D.Purple'),
+            ('#3F51B5','Indigo'),('#2196F3','Blue'),('#03A9F4','L.Blue'),('#00BCD4','Cyan'),
+            ('#009688','Teal'),('#4CAF50','Green'),('#8BC34A','L.Green'),('#CDDC39','Lime'),
+            ('#FFEB3B','Yellow'),('#FFC107','Amber'),('#FF9800','Orange'),('#FF5722','D.Orange'),
+            ('#795548','Brown'),('#9E9E9E','Grey'),('#607D8B','B.Grey'),('#000000','Black'),
+        ],
+        'pastel': [
+            ('#FFB3BA','Rose'),('#FFDFBA','Peach'),('#FFFFBA','Cream'),('#BAFFC9','Mint'),
+            ('#BAE1FF','Sky'),('#E8D5B7','Sand'),('#C9E4DE','Sage'),('#FADDE1','Blush'),
+            ('#FFF5BA','Butter'),('#C3B1E1','Lavender'),('#F9C9D6','Pink'),('#B5EAD7','Seafoam'),
+            ('#C7CEEA','Periwinkle'),('#FFDAC1','Apricot'),('#D4A5A5','Mauve'),('#FFE5B4','Mango'),
+            ('#D5E8D4','Pistachio'),('#F2D7D5','Coral'),('#DAEAF6','Ice'),('#E0BBE4','Orchid'),
+        ],
+    }
+
+    def _init_ui(self):
+        self.setStyleSheet("background-color: #0f172a;")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(
+            "QScrollArea{background:transparent;border:none;}"
+            "QScrollBar:vertical{background:#0f172a;width:6px;}"
+            "QScrollBar::handle:vertical{background:#334155;border-radius:3px;min-height:30px;}"
+            "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
+        )
+        content = QWidget()
+        content.setStyleSheet("background:transparent;")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(16)
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+
+        header = QHBoxLayout()
+        header.setSpacing(12)
+        icon_label = QLabel()
+        icon_label.setPixmap(self._svg_to_pixmap(self._EYEDROPPER_SVG.replace("{color}", "#a78bfa"), 28))
+        icon_label.setFixedSize(28, 28)
+        icon_label.setStyleSheet("background: transparent; border: none;")
+        header.addWidget(icon_label)
+
+        title_col = QVBoxLayout()
+        title_col.setSpacing(2)
+        title = QLabel("Color Picker")
+        title.setStyleSheet("color: #f8fafc; font-size: 20px; font-weight: bold; background: transparent; border: none;")
+        title_col.addWidget(title)
+        desc = QLabel("화면 아무 곳이나 클릭해서 색상 코드를 추출합니다")
+        desc.setStyleSheet("color: #64748b; font-size: 11px; background: transparent; border: none;")
+        title_col.addWidget(desc)
+        header.addLayout(title_col, 1)
+        layout.addLayout(header)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("background: #1e293b; border: none; max-height: 1px;")
+        layout.addWidget(sep)
+
+        preview_row = QHBoxLayout()
+        preview_row.setSpacing(20)
+        self.color_preview = QFrame()
+        self.color_preview.setFixedSize(140, 140)
+        self._set_preview_color(self._picked_color.name())
+        preview_row.addWidget(self.color_preview)
+
+        codes_layout = QVBoxLayout()
+        codes_layout.setSpacing(8)
+        self._hex_row = self._make_code_row("HEX", self._picked_color.name().upper())
+        self._rgb_row = self._make_code_row("RGB", f"{self._picked_color.red()}, {self._picked_color.green()}, {self._picked_color.blue()}")
+        h_v = self._picked_color.hslHue()
+        s_v = self._picked_color.hslSaturation()
+        l_v = self._picked_color.lightness()
+        self._hsl_row = self._make_code_row("HSL", f"{max(h_v, 0)}°, {round(s_v / 255 * 100)}%, {round(l_v / 255 * 100)}%")
+        codes_layout.addLayout(self._hex_row["layout"])
+        codes_layout.addLayout(self._rgb_row["layout"])
+        codes_layout.addLayout(self._hsl_row["layout"])
+        codes_layout.addStretch()
+        preview_row.addLayout(codes_layout, 1)
+        layout.addLayout(preview_row)
+
+        pick_btn = QPushButton()
+        pick_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        pick_btn.setFixedHeight(52)
+        btn_layout = QHBoxLayout(pick_btn)
+        btn_layout.setContentsMargins(20, 0, 20, 0)
+        btn_layout.setSpacing(10)
+        btn_icon = QLabel()
+        btn_icon.setPixmap(self._svg_to_pixmap(self._EYEDROPPER_SVG.replace("{color}", "#ffffff"), 22))
+        btn_icon.setFixedSize(22, 22)
+        btn_icon.setStyleSheet("background: transparent; border: none;")
+        btn_layout.addWidget(btn_icon)
+        btn_text = QLabel("스포이드로 색상 추출")
+        btn_text.setStyleSheet("color: #ffffff; font-size: 14px; font-weight: bold; background: transparent; border: none;")
+        btn_layout.addWidget(btn_text)
+        btn_layout.addStretch()
+        shortcut_label = QLabel("단축키: F8")
+        shortcut_label.setStyleSheet("color: rgba(255,255,255,0.5); font-size: 11px; background: transparent; border: none;")
+        btn_layout.addWidget(shortcut_label)
+        pick_btn.setStyleSheet("""
+            QPushButton { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6c5ce7, stop:1 #a78bfa); border: none; border-radius: 12px; }
+            QPushButton:hover { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7c6cf7, stop:1 #b79bff); }
+            QPushButton:pressed { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #5a4bd6, stop:1 #9679e8); }
+        """)
+        pick_btn.clicked.connect(self._start_pick)
+        layout.addWidget(pick_btn)
+
+        from PyQt6.QtGui import QShortcut, QKeySequence
+        self._shortcut = QShortcut(QKeySequence("F8"), self)
+        self._shortcut.activated.connect(self._start_pick)
+
+        hist_header = QHBoxLayout()
+        hist_label = QLabel("최근 추출 색상")
+        hist_label.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: bold; background: transparent; border: none;")
+        hist_header.addWidget(hist_label)
+        hist_header.addStretch()
+        clear_btn = QPushButton("전체 삭제")
+        clear_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        clear_btn.setStyleSheet("color: #475569; font-size: 10px; background: transparent; border: none;")
+        clear_btn.clicked.connect(self._clear_history)
+        hist_header.addWidget(clear_btn)
+        layout.addLayout(hist_header)
+
+        self._history_container = QWidget()
+        self._history_container.setStyleSheet("background: transparent; border: none;")
+        self.history_layout = QHBoxLayout(self._history_container)
+        self.history_layout.setContentsMargins(0, 0, 0, 0)
+        self.history_layout.setSpacing(6)
+        self.history_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self._empty_hint = QLabel("스포이드로 색상을 추출하면 여기에 표시됩니다")
+        self._empty_hint.setStyleSheet("color: #1e293b; font-size: 11px; background: transparent; border: none;")
+        self.history_layout.addWidget(self._empty_hint)
+        layout.addWidget(self._history_container)
+
+        # ═══════════════════════════════════════
+        # ★ Color Harmony ★
+        # ═══════════════════════════════════════
+        sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setStyleSheet("background:#1e293b;border:none;max-height:1px;")
+        layout.addWidget(sep2)
+        h_lbl = QLabel("Color Harmony")
+        h_lbl.setStyleSheet("color:#94a3b8;font-size:12px;font-weight:bold;background:transparent;border:none;")
+        layout.addWidget(h_lbl)
+
+        h_btns = QHBoxLayout(); h_btns.setSpacing(4)
+        self._harmony_mode = 'complementary'
+        self._harmony_btns = {}
+        for mode, lbl in [('complementary','Complementary'),('analogous','Analogous'),('triadic','Triadic'),('split','Split-Comp'),('tetradic','Square')]:
+            b = QPushButton(lbl); b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            b.setFixedHeight(26); b.setCheckable(True); b.setChecked(mode == 'complementary')
+            b.clicked.connect(lambda _, m=mode: self._set_harmony(m))
+            self._harmony_btns[mode] = b; h_btns.addWidget(b)
+        h_btns.addStretch()
+        self._style_toggle_btns(self._harmony_btns, self._harmony_mode)
+        layout.addLayout(h_btns)
+
+        self._harmony_container = QWidget()
+        self._harmony_container.setStyleSheet("background:transparent;border:none;")
+        self._harmony_flow = QHBoxLayout(self._harmony_container)
+        self._harmony_flow.setContentsMargins(0, 4, 0, 4)
+        self._harmony_flow.setSpacing(8)
+        layout.addWidget(self._harmony_container)
+        self._refresh_harmony()
+
+        # ═══════════════════════════════════════
+        # ★ Gradient Generator ★
+        # ═══════════════════════════════════════
+        sep3 = QFrame(); sep3.setFrameShape(QFrame.Shape.HLine)
+        sep3.setStyleSheet("background:#1e293b;border:none;max-height:1px;")
+        layout.addWidget(sep3)
+        g_lbl = QLabel("Gradient Generator")
+        g_lbl.setStyleSheet("color:#94a3b8;font-size:12px;font-weight:bold;background:transparent;border:none;")
+        layout.addWidget(g_lbl)
+
+        self._grad_color2 = QColor("#0ea5e9")
+        self._gradient_bar = QFrame()
+        self._gradient_bar.setFixedHeight(48)
+        layout.addWidget(self._gradient_bar)
+        self._refresh_gradient()
+
+        g_row = QHBoxLayout(); g_row.setSpacing(8)
+        self._grad_css = QLabel()
+        self._grad_css.setStyleSheet("color:#94a3b8;font-size:10px;font-family:Consolas;background:#1e293b;border:1px solid #334155;border-radius:6px;padding:6px 10px;")
+        self._grad_css.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        g_row.addWidget(self._grad_css, 1)
+        g_copy = QPushButton("Copy CSS")
+        g_copy.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        g_copy.setFixedHeight(28)
+        g_copy.setStyleSheet("QPushButton{background:#1e293b;color:#94a3b8;font-size:10px;border:1px solid #334155;border-radius:6px;padding:0 12px;}QPushButton:hover{background:#334155;}")
+        g_copy.clicked.connect(lambda: self._copy_value(self._grad_css.text()))
+        g_row.addWidget(g_copy)
+        layout.addLayout(g_row)
+        self._refresh_gradient()
+
+        g_end = QHBoxLayout(); g_end.setSpacing(8)
+        el = QLabel("End Color:")
+        el.setStyleSheet("color:#64748b;font-size:10px;background:transparent;border:none;")
+        g_end.addWidget(el)
+        self._grad_end_swatch = QPushButton()
+        self._grad_end_swatch.setFixedSize(28, 28)
+        self._grad_end_swatch.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._grad_end_swatch.setStyleSheet(f"QPushButton{{background:{self._grad_color2.name()};border:2px solid #334155;border-radius:6px;}}QPushButton:hover{{border-color:#a78bfa;}}")
+        self._grad_end_swatch.clicked.connect(self._pick_grad_end)
+        g_end.addWidget(self._grad_end_swatch)
+        self._grad_hex_input = QLineEdit(self._grad_color2.name().upper())
+        self._grad_hex_input.setFixedWidth(90)
+        self._grad_hex_input.setStyleSheet("color:#f1f5f9;font-size:11px;font-family:Consolas;background:#1e293b;border:1px solid #334155;border-radius:6px;padding:4px 8px;")
+        self._grad_hex_input.returnPressed.connect(self._apply_grad_hex)
+        g_end.addWidget(self._grad_hex_input)
+        g_end.addStretch()
+        layout.addLayout(g_end)
+
+        # ═══════════════════════════════════════
+        # ★ Preset Palettes ★
+        # ═══════════════════════════════════════
+        sep4 = QFrame(); sep4.setFrameShape(QFrame.Shape.HLine)
+        sep4.setStyleSheet("background:#1e293b;border:none;max-height:1px;")
+        layout.addWidget(sep4)
+        p_lbl = QLabel("Palettes")
+        p_lbl.setStyleSheet("color:#94a3b8;font-size:12px;font-weight:bold;background:transparent;border:none;")
+        layout.addWidget(p_lbl)
+
+        p_tabs = QHBoxLayout(); p_tabs.setSpacing(4)
+        self._palette_mode = 'tailwind'
+        self._palette_btns = {}
+        for mode, lbl in [('tailwind','Tailwind'),('material','Material'),('pastel','Pastel')]:
+            b = QPushButton(lbl); b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            b.setFixedHeight(26); b.setCheckable(True); b.setChecked(mode == 'tailwind')
+            b.clicked.connect(lambda _, m=mode: self._set_palette(m))
+            self._palette_btns[mode] = b; p_tabs.addWidget(b)
+        p_tabs.addStretch()
+        self._style_toggle_btns(self._palette_btns, self._palette_mode)
+        layout.addLayout(p_tabs)
+
+        self._palette_container = QWidget()
+        self._palette_container.setStyleSheet("background:transparent;border:none;")
+        layout.addWidget(self._palette_container)
+        self._refresh_palette()
+
+        # ═══════════════════════════════════════
+        # ★ Image → Palette ★
+        # ═══════════════════════════════════════
+        sep5 = QFrame(); sep5.setFrameShape(QFrame.Shape.HLine)
+        sep5.setStyleSheet("background:#1e293b;border:none;max-height:1px;")
+        layout.addWidget(sep5)
+        i_lbl = QLabel("Image Palette")
+        i_lbl.setStyleSheet("color:#94a3b8;font-size:12px;font-weight:bold;background:transparent;border:none;")
+        layout.addWidget(i_lbl)
+
+        self._img_drop = QPushButton("Click to select image or drag & drop")
+        self._img_drop.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._img_drop.setFixedHeight(56)
+        self._img_drop.setStyleSheet("QPushButton{background:#1e293b;color:#475569;font-size:12px;border:2px dashed #334155;border-radius:12px;}QPushButton:hover{border-color:#6c5ce7;color:#94a3b8;}")
+        self._img_drop.clicked.connect(self._select_image_for_palette)
+        layout.addWidget(self._img_drop)
+
+        self._img_palette_container = QWidget()
+        self._img_palette_container.setStyleSheet("background:transparent;border:none;")
+        self._img_palette_flow = QHBoxLayout(self._img_palette_container)
+        self._img_palette_flow.setContentsMargins(0, 4, 0, 4)
+        self._img_palette_flow.setSpacing(8)
+        self._img_palette_container.setVisible(False)
+        layout.addWidget(self._img_palette_container)
+
+        layout.addSpacing(20)
+
+    def _set_preview_color(self, hex_color: str):
+        self.color_preview.setStyleSheet(f"QFrame {{ background-color: {hex_color}; border-radius: 70px; border: 3px solid #334155; }}")
+
+    def _make_code_row(self, label_text, value_text):
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        label = QLabel(label_text)
+        label.setFixedWidth(34)
+        label.setStyleSheet("color: #64748b; font-size: 10px; font-weight: bold; background: transparent; border: none;")
+        row.addWidget(label)
+        value = QLabel(value_text)
+        value.setStyleSheet("color: #f1f5f9; font-size: 13px; font-family: Consolas, monospace; background: #1e293b; border: 1px solid #334155; border-radius: 6px; padding: 5px 10px;")
+        value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        row.addWidget(value, 1)
+        copy_btn = QPushButton("\U0001f4cb")
+        copy_btn.setToolTip(f"{label_text} 값 복사")
+        copy_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        copy_btn.setFixedSize(32, 28)
+        copy_btn.setStyleSheet("QPushButton { background: #1e293b; color: #94a3b8; font-size: 12px; border: 1px solid #334155; border-radius: 6px; } QPushButton:hover { background: #334155; }")
+        copy_btn.clicked.connect(lambda: self._copy_value(value.text()))
+        row.addWidget(copy_btn)
+        return {"layout": row, "value": value}
+
+    def _copy_value(self, text):
+        try:
+            pyperclip.copy(text)
+        except Exception:
+            pass
+
+    def _update_display(self, color: QColor):
+        self._picked_color = color
+        hex_val = color.name().upper()
+        rgb_val = f"{color.red()}, {color.green()}, {color.blue()}"
+        h, s, l = color.hslHue(), color.hslSaturation(), color.lightness()
+        hsl_val = f"{max(h, 0)}\u00b0, {round(s / 255 * 100)}%, {round(l / 255 * 100)}%"
+        self._set_preview_color(hex_val)
+        self._hex_row["value"].setText(hex_val)
+        self._rgb_row["value"].setText(rgb_val)
+        self._hsl_row["value"].setText(hsl_val)
+        # 연동: 조화/그라디언트 갱신
+        if hasattr(self, '_harmony_flow'):
+            self._refresh_harmony()
+        if hasattr(self, '_gradient_bar'):
+            self._refresh_gradient()
+        if not self._history or self._history[0] != hex_val:
+            self._history.insert(0, hex_val)
+            if len(self._history) > 20:
+                self._history.pop()
+            self._rebuild_history()
+        try:
+            pyperclip.copy(hex_val)
+        except Exception:
+            pass
+
+    def _rebuild_history(self):
+        while self.history_layout.count():
+            item = self.history_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for hex_color in self._history:
+            swatch = QPushButton()
+            swatch.setFixedSize(34, 34)
+            swatch.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            swatch.setToolTip(hex_color)
+            swatch.setStyleSheet(f"QPushButton {{ background-color: {hex_color}; border: 2px solid #1e293b; border-radius: 8px; }} QPushButton:hover {{ border-color: #a78bfa; }}")
+            swatch.clicked.connect(lambda checked, c=hex_color: self._update_display(QColor(c)))
+            self.history_layout.addWidget(swatch)
+
+    def _clear_history(self):
+        self._history.clear()
+        while self.history_layout.count():
+            item = self.history_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._empty_hint = QLabel("스포이드로 색상을 추출하면 여기에 표시됩니다")
+        self._empty_hint.setStyleSheet("color: #1e293b; font-size: 11px; background: transparent; border: none;")
+        self.history_layout.addWidget(self._empty_hint)
+
+    # ══════════════════════════════════════════════
+    # Toggle button styling (shared by harmony & palette tabs)
+    # ══════════════════════════════════════════════
+    @staticmethod
+    def _style_toggle_btns(btns_dict, active_mode):
+        for m, b in btns_dict.items():
+            if m == active_mode:
+                b.setStyleSheet("QPushButton{background:#6c5ce7;color:#fff;font-size:10px;font-weight:bold;border:none;border-radius:6px;padding:0 10px;}")
+            else:
+                b.setStyleSheet("QPushButton{background:#1e293b;color:#64748b;font-size:10px;border:1px solid #334155;border-radius:6px;padding:0 10px;}QPushButton:hover{background:#334155;color:#94a3b8;}")
+
+    # ── Color Harmony ──
+    def _set_harmony(self, mode):
+        self._harmony_mode = mode
+        for m, b in self._harmony_btns.items():
+            b.setChecked(m == mode)
+        self._style_toggle_btns(self._harmony_btns, mode)
+        self._refresh_harmony()
+
+    def _compute_harmony(self, mode):
+        c = self._picked_color
+        h = c.hslHueF(); s = c.hslSaturationF(); l = c.lightnessF()
+        if h < 0: h = 0.0
+        offsets = {
+            'complementary': [0, 0.5],
+            'analogous': [-1/12, 0, 1/12],
+            'triadic': [0, 1/3, 2/3],
+            'split': [0, 5/12, 7/12],
+            'tetradic': [0, 1/4, 1/2, 3/4],
+        }
+        colors = []
+        for off in offsets.get(mode, [0]):
+            nh = (h + off) % 1.0
+            colors.append(QColor.fromHslF(max(0, min(1, nh)), max(0, min(1, s)), max(0, min(1, l))))
+        return colors
+
+    def _refresh_harmony(self):
+        while self._harmony_flow.count():
+            item = self._harmony_flow.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+        for c in self._compute_harmony(self._harmony_mode):
+            w = QWidget(); w.setStyleSheet("background:transparent;border:none;")
+            vl = QVBoxLayout(w); vl.setContentsMargins(0,0,0,0); vl.setSpacing(2)
+            vl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            btn = QPushButton(); btn.setFixedSize(48, 48)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            hx = c.name().upper(); btn.setToolTip(hx)
+            btn.setStyleSheet(f"QPushButton{{background:{c.name()};border:2px solid #1e293b;border-radius:10px;}}QPushButton:hover{{border-color:#a78bfa;}}")
+            btn.clicked.connect(lambda _, col=c: self._update_display(col))
+            vl.addWidget(btn)
+            lbl = QLabel(hx); lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet("color:#64748b;font-size:8px;font-family:Consolas;background:transparent;border:none;")
+            vl.addWidget(lbl)
+            self._harmony_flow.addWidget(w)
+        self._harmony_flow.addStretch()
+
+    # ── Gradient ──
+    def _refresh_gradient(self):
+        c1, c2 = self._picked_color.name(), self._grad_color2.name()
+        self._gradient_bar.setStyleSheet(f"QFrame{{border-radius:10px;background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 {c1},stop:1 {c2});}}")
+        css = f"background: linear-gradient(90deg, {c1} 0%, {c2} 100%);"
+        if hasattr(self, '_grad_css'):
+            self._grad_css.setText(css)
+        if hasattr(self, '_grad_end_swatch'):
+            self._grad_end_swatch.setStyleSheet(f"QPushButton{{background:{c2};border:2px solid #334155;border-radius:6px;}}QPushButton:hover{{border-color:#a78bfa;}}")
+            self._grad_hex_input.setText(c2.upper())
+
+    def _pick_grad_end(self):
+        from PyQt6.QtWidgets import QColorDialog
+        c = QColorDialog.getColor(self._grad_color2, self, "End Color")
+        if c.isValid():
+            self._grad_color2 = c
+            self._refresh_gradient()
+
+    def _apply_grad_hex(self):
+        t = self._grad_hex_input.text().strip()
+        if not t.startswith('#'): t = '#' + t
+        c = QColor(t)
+        if c.isValid():
+            self._grad_color2 = c
+            self._refresh_gradient()
+
+    # ── Preset Palettes ──
+    def _set_palette(self, mode):
+        self._palette_mode = mode
+        for m, b in self._palette_btns.items():
+            b.setChecked(m == mode)
+        self._style_toggle_btns(self._palette_btns, mode)
+        self._refresh_palette()
+
+    def _refresh_palette(self):
+        old = self._palette_container.layout()
+        if old:
+            while old.count():
+                item = old.takeAt(0)
+                if item.widget(): item.widget().deleteLater()
+            QWidget().setLayout(old)
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 4, 0, 4); grid.setSpacing(6)
+        colors = self._PALETTE_DATA.get(self._palette_mode, [])
+        cols = 10
+        for i, (hex_c, name) in enumerate(colors):
+            r, co = divmod(i, cols)
+            btn = QPushButton(); btn.setFixedSize(34, 34)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setToolTip(f"{name}\n{hex_c}")
+            btn.setStyleSheet(f"QPushButton{{background:{hex_c};border:2px solid #0f172a;border-radius:8px;}}QPushButton:hover{{border-color:#a78bfa;}}")
+            btn.clicked.connect(lambda _, c=hex_c: self._update_display(QColor(c)))
+            grid.addWidget(btn, r, co)
+        self._palette_container.setLayout(grid)
+
+    # ── Image Palette ──
+    def _select_image_for_palette(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select Image", "", "Images (*.png *.jpg *.jpeg *.bmp *.webp)")
+        if path:
+            self._extract_palette(path)
+
+    def _extract_palette(self, path):
+        from PyQt6.QtGui import QImage
+        from collections import Counter
+        img = QImage(path)
+        if img.isNull(): return
+        scaled = img.scaled(80, 80, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        counts = Counter()
+        for y in range(scaled.height()):
+            for x in range(scaled.width()):
+                c = QColor(scaled.pixel(x, y))
+                counts[((c.red()//24)*24, (c.green()//24)*24, (c.blue()//24)*24)] += 1
+        top = []
+        for (r, g, b), _ in counts.most_common(60):
+            if len(top) >= 8: break
+            if r + g + b < 30 or r + g + b > 720: continue
+            if any(abs(r-tr)+abs(g-tg)+abs(b-tb) < 60 for tr, tg, tb in top): continue
+            top.append((r, g, b))
+        if not top:
+            top = [(r, g, b) for (r, g, b), _ in counts.most_common(8)]
+        while self._img_palette_flow.count():
+            item = self._img_palette_flow.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+        self._img_palette_container.setVisible(True)
+        for r, g, b in top:
+            hx = f"#{r:02x}{g:02x}{b:02x}"
+            w = QWidget(); w.setStyleSheet("background:transparent;border:none;")
+            vl = QVBoxLayout(w); vl.setContentsMargins(0,0,0,0); vl.setSpacing(2)
+            btn = QPushButton(); btn.setFixedSize(48, 48)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setToolTip(hx.upper())
+            btn.setStyleSheet(f"QPushButton{{background:{hx};border:2px solid #1e293b;border-radius:10px;}}QPushButton:hover{{border-color:#a78bfa;}}")
+            btn.clicked.connect(lambda _, c=hx: self._update_display(QColor(c)))
+            vl.addWidget(btn)
+            lbl = QLabel(hx.upper()); lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet("color:#64748b;font-size:8px;font-family:Consolas;background:transparent;border:none;")
+            vl.addWidget(lbl)
+            self._img_palette_flow.addWidget(w)
+        self._img_palette_flow.addStretch()
+
+    def _start_pick(self):
+        if self._is_picking:
+            return
+        self._is_picking = True
+        self.window().hide()
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(400, self._capture_screen)
+
+    def _capture_screen(self):
+        from PyQt6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen()
+        if not screen:
+            self._is_picking = False
+            self.window().show()
+            return
+
+        # 물리 해상도 스크린샷 (픽셀 데이터 읽기 전용 — 배경에 그리지 않음)
+        screenshot = screen.grabWindow(0)
+        dpr = screen.devicePixelRatio()
+
+        self._overlay = _ScreenOverlay(screenshot, dpr, self._on_color_picked)
+        self._overlay.showFullScreen()
+
+    def _on_color_picked(self, color: QColor):
+        self._is_picking = False
+        self.window().show()
+        self.window().activateWindow()
+        if color and color.isValid():
+            self._update_display(color)
+
+
+class _ScreenOverlay(QWidget):
+    """투명 오버레이 스포이드 — 실제 화면이 그대로 보이고 커서+돋보기만 표시"""
+
+    def __init__(self, screenshot, dpr, callback, parent=None):
+        super().__init__(parent)
+        self._img = screenshot.toImage()   # 물리 해상도 이미지 (픽셀 데이터 전용)
+        self._dpr = dpr
+        self.callback = callback
+        self._called_back = False
+        self._mouse_pos = None
+        # 돋보기 확대 프리셋 (n x n 그리드, 픽셀 크기) — 휠로 전환
+        self._zoom_presets = [
+            (7, 22),    # x22 매우 확대
+            (9, 17),    # x17
+            (11, 14),   # x14 기본
+            (15, 10),   # x10
+            (21, 7),    # x7 넓은 시야
+        ]
+        self._zoom_idx = 2      # 기본: 11x14
+        self._zoom_n = self._zoom_presets[self._zoom_idx][0]
+        self._zoom_px = self._zoom_presets[self._zoom_idx][1]
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        # ★ 핵심: 투명 배경 — 스크린샷을 그리지 않으므로 실제 화면이 보임
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setCursor(QCursor(Qt.CursorShape.BlankCursor))
+        self.setMouseTracking(True)
+
+    # ── 논리좌표 → 물리좌표 변환하여 스크린샷에서 색상 읽기 ──
+    def _pixel_at(self, logical_x, logical_y):
+        px = int(logical_x * self._dpr)
+        py = int(logical_y * self._dpr)
+        if 0 <= px < self._img.width() and 0 <= py < self._img.height():
+            return QColor(self._img.pixel(px, py))
+        return QColor(0, 0, 0)
+
+    # ── 물리 좌표에서 직접 색상 읽기 (돋보기용) ──
+    def _phys_pixel(self, phys_x, phys_y):
+        if 0 <= phys_x < self._img.width() and 0 <= phys_y < self._img.height():
+            return QColor(self._img.pixel(phys_x, phys_y))
+        return QColor(15, 23, 42)
+
+    def paintEvent(self, event):
+        from PyQt6.QtGui import QPainter, QPen, QBrush, QFont
+        p = QPainter(self)
+
+        # ★ 배경: alpha=1 (거의 완전 투명, 마우스 이벤트 캡처용)
+        #   실제 화면이 그대로 보임 — 스크린샷을 배경에 그리지 않음
+        p.fillRect(self.rect(), QColor(0, 0, 0, 1))
+
+        if not self._mouse_pos:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            bw, bh = 460, 60
+            bx, by = (self.width() - bw) // 2, (self.height() - bh) // 2
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 0, 0, 180))
+            p.drawRoundedRect(bx, by, bw, bh, 14, 14)
+            p.setPen(QColor(255, 255, 255, 230))
+            p.setFont(QFont("Segoe UI", 15, QFont.Weight.Bold))
+            p.drawText(bx, by, bw, bh, Qt.AlignmentFlag.AlignCenter,
+                       "Click to pick  |  ESC cancel")
+            p.end()
+            return
+
+        mx, my = self._mouse_pos.x(), self._mouse_pos.y()
+        cur = self._pixel_at(mx, my)
+        hex_t = cur.name().upper()
+
+        # ── 커서: 큰 색상 원 + 십자선 ──
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        R = 28
+        # 그림자
+        p.setPen(QPen(QColor(0, 0, 0, 160), 2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(mx - R - 2, my - R - 2, R * 2 + 4, R * 2 + 4)
+        # 메인 원 (현재 색상으로 채움)
+        p.setPen(QPen(QColor(255, 255, 255), 3))
+        p.setBrush(QBrush(cur))
+        p.drawEllipse(mx - R, my - R, R * 2, R * 2)
+        # 십자선
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        cl = 10
+        for c, w in [(QColor(0, 0, 0, 220), 3), (QColor(255, 255, 255), 1)]:
+            p.setPen(QPen(c, w))
+            p.drawLine(mx - cl, my, mx + cl, my)
+            p.drawLine(mx, my - cl, mx, my + cl)
+
+        # 가이드 점선
+        p.setPen(QPen(QColor(255, 255, 255, 50), 1, Qt.PenStyle.DashLine))
+        p.drawLine(mx, 0, mx, my - R - 3)
+        p.drawLine(mx, my + R + 3, mx, self.height())
+        p.drawLine(0, my, mx - R - 3, my)
+        p.drawLine(mx + R + 3, my, self.width(), my)
+
+        # ── 돋보기 (물리 픽셀 기준 확대) ──
+        n = self._zoom_n
+        half = n // 2
+        ps = self._zoom_px
+        mw = n * ps
+        gap = R + 16
+        tw, th = mw + 8, mw + 50
+        lx, ly = mx + gap, my - th // 2
+        if lx + tw > self.width() - 10:
+            lx = mx - gap - tw
+        ly = max(10, min(ly, self.height() - 10 - th))
+
+        # 돋보기 배경 (반투명 패널)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 140))
+        p.drawRoundedRect(lx + 3, ly + 3, tw, th, 12, 12)
+        p.setBrush(QColor(15, 23, 42, 240))
+        p.setPen(QPen(QColor(71, 85, 105), 2))
+        p.drawRoundedRect(lx, ly, tw, th, 12, 12)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        # 확대 픽셀 (물리 좌표 기준 — 1:1 정확한 픽셀)
+        phys_cx = int(mx * self._dpr)
+        phys_cy = int(my * self._dpr)
+        ox, oy = lx + 4, ly + 4
+        for dy in range(n):
+            for dx in range(n):
+                c = self._phys_pixel(phys_cx - half + dx, phys_cy - half + dy)
+                p.fillRect(ox + dx * ps, oy + dy * ps, ps, ps, c)
+
+        # 그리드
+        p.setPen(QPen(QColor(255, 255, 255, 18), 1))
+        for i in range(n + 1):
+            p.drawLine(ox + i * ps, oy, ox + i * ps, oy + n * ps)
+            p.drawLine(ox, oy + i * ps, ox + n * ps, oy + i * ps)
+
+        # 중앙 픽셀 강조 (이게 지금 찍을 색상)
+        ccx, ccy = ox + half * ps, oy + half * ps
+        p.setPen(QPen(QColor(0, 0, 0, 220), 3))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(ccx - 1, ccy - 1, ps + 2, ps + 2)
+        p.setPen(QPen(QColor(255, 255, 255), 1))
+        p.drawRect(ccx, ccy, ps, ps)
+
+        # 하단 색상 정보
+        bar_y = oy + n * ps + 6
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor(71, 85, 105), 1))
+        p.setBrush(QBrush(cur))
+        p.drawRoundedRect(ox + 2, bar_y + 3, 32, 32, 6, 6)
+        p.setPen(QColor(248, 250, 252))
+        p.setFont(QFont("Consolas", 13, QFont.Weight.Bold))
+        p.drawText(ox + 42, bar_y + 20, hex_t)
+        p.setPen(QColor(100, 116, 139))
+        p.setFont(QFont("Consolas", 9))
+        p.drawText(ox + 42, bar_y + 34,
+                   f"rgb({cur.red()}, {cur.green()}, {cur.blue()})")
+        p.end()
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y()
+        if delta > 0 and self._zoom_idx > 0:
+            self._zoom_idx -= 1
+        elif delta < 0 and self._zoom_idx < len(self._zoom_presets) - 1:
+            self._zoom_idx += 1
+        self._zoom_n, self._zoom_px = self._zoom_presets[self._zoom_idx]
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        self._mouse_pos = event.pos()
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._mouse_pos:
+            color = self._pixel_at(self._mouse_pos.x(), self._mouse_pos.y())
+            self._called_back = True
+            self.close()
+            self.callback(color)
+            return
+        if event.button() == Qt.MouseButton.RightButton:
+            self._called_back = True
+            self.close()
+            self.callback(QColor())
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self._called_back = True
+            self.close()
+            self.callback(QColor())
+
+    def closeEvent(self, event):
+        if not self._called_back:
+            self.callback(QColor())
+        super().closeEvent(event)
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  배경 제거 (Background Remover) – rembg + 수동 지우개
+# ═══════════════════════════════════════════════════════════════════
+
+class _BgRemoveWorker(QThread):
+    """rembg CLI를 서브프로세스로 실행 (onnxruntime access violation 방지)"""
+    finished = pyqtSignal(QImage)   # 결과 투명 이미지
+    error = pyqtSignal(str)
+    status = pyqtSignal(str)
+
+    def __init__(self, image_path: str, parent=None):
+        super().__init__(parent)
+        self._path = image_path
+
+    def run(self):
+        try:
+            import tempfile as _tf
+
+            # 출력 임시 파일
+            out_fd, out_path = _tf.mkstemp(suffix=".png")
+            os.close(out_fd)
+
+            self.status.emit("배경 제거 중...")
+
+            # PyQt6 + onnxruntime DLL 충돌 방지: 별도 프로세스에서 rembg 실행
+            helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_rembg_helper.py")
+            result = subprocess.run(
+                [sys.executable, helper, self._path, out_path],
+                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
+            )
+
+            if result.returncode != 0:
+                err_msg = result.stderr.strip() or f"rembg 실패 (code {result.returncode})"
+                try:
+                    os.remove(out_path)
+                except:
+                    pass
+                self.error.emit(err_msg)
+                return
+
+            # 결과 PNG → QImage
+            qimg = QImage(out_path)
+            try:
+                os.remove(out_path)
+            except:
+                pass
+
+            if qimg.isNull():
+                self.error.emit("결과 이미지를 읽을 수 없습니다")
+                return
+
+            self.finished.emit(qimg)
+        except subprocess.TimeoutExpired:
+            self.error.emit("배경 제거 시간 초과 (5분)")
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class _InpaintWorker(QThread):
+    """OpenCV 인페인팅을 서브프로세스로 실행"""
+    finished = pyqtSignal(QImage)
+    error = pyqtSignal(str)
+
+    def __init__(self, image_path: str, mask_path: str, parent=None):
+        super().__init__(parent)
+        self._img_path = image_path
+        self._mask_path = mask_path
+
+    def run(self):
+        try:
+            import tempfile as _tf
+            out_fd, out_path = _tf.mkstemp(suffix=".png")
+            os.close(out_fd)
+
+            helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_inpaint_helper.py")
+            result = subprocess.run(
+                [sys.executable, helper, self._img_path, self._mask_path, out_path],
+                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=120,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
+            )
+
+            if result.returncode != 0:
+                err_msg = result.stderr.strip() or f"인페인팅 실패 (code {result.returncode})"
+                try: os.remove(out_path)
+                except: pass
+                self.error.emit(err_msg)
+                return
+
+            qimg = QImage(out_path)
+            try: os.remove(out_path)
+            except: pass
+
+            if qimg.isNull():
+                self.error.emit("결과 이미지를 읽을 수 없습니다")
+                return
+
+            self.finished.emit(qimg)
+        except subprocess.TimeoutExpired:
+            self.error.emit("인페인팅 시간 초과 (2분)")
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class _BgCanvas(QWidget):
+    """투명 배경 시각화 캔버스 – 체커보드 + 이미지 + 지우개/복원/인페인트 도구"""
+
+    TOOL_NONE = 0
+    TOOL_ERASER = 1
+    TOOL_RESTORE = 2
+    TOOL_INPAINT = 3
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(300, 300)
+        self.setMouseTracking(True)
+
+        self._image: QImage | None = None       # RGBA 이미지 (편집 중)
+        self._original: QImage | None = None    # 원본 이미지 (복원용)
+        self._scale = 1.0
+        self._offset_x = 0.0
+        self._offset_y = 0.0
+
+        # 도구
+        self._tool = self.TOOL_NONE
+        self._brush_size = 20
+        self._is_painting = False
+        self._last_pt: QPoint | None = None
+
+        # 인페인트 마스크 (흰=칠한영역, 검=안칠한영역)
+        self._mask: QImage | None = None
+
+        # Undo / Redo
+        self._undo_stack: list[QImage] = []
+        self._redo_stack: list[QImage] = []
+        self._max_undo = 20
+
+    # ── 좌표 변환 ──
+    def _widget_to_image(self, wx: float, wy: float):
+        """위젯 좌표 → 이미지 픽셀 좌표"""
+        if not self._image:
+            return -1, -1
+        ix = (wx - self._offset_x) / self._scale
+        iy = (wy - self._offset_y) / self._scale
+        return int(ix), int(iy)
+
+    def _fit_image(self):
+        """이미지를 캔버스에 맞게 중앙 배치"""
+        if not self._image:
+            return
+        w, h = self.width(), self.height()
+        iw, ih = self._image.width(), self._image.height()
+        if iw == 0 or ih == 0:
+            return
+        scale = min(w / iw, h / ih) * 0.9
+        self._scale = scale
+        self._offset_x = (w - iw * scale) / 2
+        self._offset_y = (h - ih * scale) / 2
+
+    def set_image(self, qimg: QImage, keep_undo: bool = False):
+        if keep_undo and self._image:
+            self.push_undo()
+        else:
+            self._undo_stack.clear()
+        self._redo_stack.clear()
+        self._image = qimg.convertToFormat(QImage.Format.Format_ARGB32)
+        self._mask = None
+        self._fit_image()
+        self.update()
+
+    def set_original(self, qimg: QImage):
+        """복원 브러시용 원본 저장"""
+        self._original = qimg.convertToFormat(QImage.Format.Format_ARGB32)
+
+    def get_image(self) -> QImage | None:
+        return self._image
+
+    def set_tool(self, tool: int):
+        self._tool = tool
+        self.setCursor(Qt.CursorShape.CrossCursor if tool != self.TOOL_NONE else Qt.CursorShape.ArrowCursor)
+        # 인페인트 모드 진입 시 빈 마스크 생성
+        if tool == self.TOOL_INPAINT and self._image and self._mask is None:
+            self._mask = QImage(self._image.size(), QImage.Format.Format_ARGB32)
+            self._mask.fill(QColor(0, 0, 0, 0))
+        self.update()
+
+    def clear_mask(self):
+        """인페인트 마스크 초기화"""
+        if self._image:
+            self._mask = QImage(self._image.size(), QImage.Format.Format_ARGB32)
+            self._mask.fill(QColor(0, 0, 0, 0))
+            self.update()
+
+    def get_mask(self) -> QImage | None:
+        return self._mask
+
+    def has_mask_content(self) -> bool:
+        """마스크에 칠한 영역이 있는지"""
+        if not self._mask:
+            return False
+        # 빠른 체크: 알파값이 0이 아닌 픽셀이 하나라도 있으면
+        for y in range(0, self._mask.height(), 10):
+            for x in range(0, self._mask.width(), 10):
+                if self._mask.pixelColor(x, y).alpha() > 0:
+                    return True
+        return False
+
+    def set_brush_size(self, size: int):
+        self._brush_size = size
+        self.update()
+
+    def push_undo(self):
+        if self._image:
+            if len(self._undo_stack) >= self._max_undo:
+                self._undo_stack.pop(0)
+            self._undo_stack.append(self._image.copy())
+            self._redo_stack.clear()
+
+    def undo(self) -> bool:
+        if self._undo_stack and self._image:
+            self._redo_stack.append(self._image.copy())
+            self._image = self._undo_stack.pop()
+            self.update()
+            return True
+        return False
+
+    def redo(self) -> bool:
+        if self._redo_stack and self._image:
+            self._undo_stack.append(self._image.copy())
+            self._image = self._redo_stack.pop()
+            self.update()
+            return True
+        return False
+
+    def can_undo(self) -> bool:
+        return len(self._undo_stack) > 0
+
+    def can_redo(self) -> bool:
+        return len(self._redo_stack) > 0
+
+    # ── 브러시 그리기 ──
+    def _paint_at(self, ix: int, iy: int):
+        if not self._image:
+            return
+        r = self._brush_size / 2 / self._scale
+        if self._tool == self.TOOL_ERASER:
+            painter = QPainter(self._image)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor(0, 0, 0, 0)))
+            painter.drawEllipse(QPoint(ix, iy), int(r), int(r))
+            painter.end()
+        elif self._tool == self.TOOL_RESTORE and self._original:
+            self._restore_circle(ix, iy, int(r))
+        elif self._tool == self.TOOL_INPAINT and self._mask:
+            painter = QPainter(self._mask)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor(255, 60, 60, 160)))
+            painter.drawEllipse(QPoint(ix, iy), int(r), int(r))
+            painter.end()
+        self.update()
+
+    def _paint_line(self, x0, y0, x1, y1):
+        if not self._image:
+            return
+        r = self._brush_size / 2 / self._scale
+        if self._tool == self.TOOL_ERASER:
+            painter = QPainter(self._image)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            pen = QPen(QColor(0, 0, 0, 0), r * 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.drawLine(QPoint(x0, y0), QPoint(x1, y1))
+            painter.end()
+        elif self._tool == self.TOOL_RESTORE and self._original:
+            # 두 점 사이 보간
+            import math
+            dx, dy = x1 - x0, y1 - y0
+            dist = max(1, int(math.hypot(dx, dy)))
+            ri = int(r)
+            for i in range(dist + 1):
+                t = i / dist
+                cx = int(x0 + dx * t)
+                cy = int(y0 + dy * t)
+                self._restore_circle(cx, cy, ri)
+        elif self._tool == self.TOOL_INPAINT and self._mask:
+            painter = QPainter(self._mask)
+            pen = QPen(QColor(255, 60, 60, 160), r * 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.drawLine(QPoint(x0, y0), QPoint(x1, y1))
+            painter.end()
+        self.update()
+
+    def _restore_circle(self, cx: int, cy: int, r: int):
+        """원본 이미지에서 원형 영역 복원"""
+        if not self._image or not self._original:
+            return
+        iw, ih = self._image.width(), self._image.height()
+        ow, oh = self._original.width(), self._original.height()
+        for dy in range(-r, r + 1):
+            for dx in range(-r, r + 1):
+                if dx * dx + dy * dy > r * r:
+                    continue
+                px, py = cx + dx, cy + dy
+                if 0 <= px < iw and 0 <= py < ih and px < ow and py < oh:
+                    self._image.setPixelColor(px, py, self._original.pixelColor(px, py))
+
+    # ── 마우스 이벤트 ──
+    def mousePressEvent(self, event):
+        if self._tool != self.TOOL_NONE and event.button() == Qt.MouseButton.LeftButton and self._image:
+            self.push_undo()
+            ix, iy = self._widget_to_image(event.position().x(), event.position().y())
+            self._paint_at(ix, iy)
+            self._is_painting = True
+            self._last_pt = QPoint(ix, iy)
+
+    def mouseMoveEvent(self, event):
+        if self._is_painting and self._tool != self.TOOL_NONE and self._image:
+            ix, iy = self._widget_to_image(event.position().x(), event.position().y())
+            if self._last_pt:
+                self._paint_line(self._last_pt.x(), self._last_pt.y(), ix, iy)
+            self._last_pt = QPoint(ix, iy)
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        self._is_painting = False
+        self._last_pt = None
+
+    def wheelEvent(self, event):
+        """마우스 휠로 확대/축소"""
+        if not self._image:
+            return
+        delta = event.angleDelta().y()
+        factor = 1.1 if delta > 0 else 0.9
+        mx, my = event.position().x(), event.position().y()
+        # 마우스 포인트 중심 줌
+        self._offset_x = mx - (mx - self._offset_x) * factor
+        self._offset_y = my - (my - self._offset_y) * factor
+        self._scale *= factor
+        self._scale = max(0.1, min(self._scale, 10.0))
+        self.update()
+
+    # ── 체커보드 + 이미지 그리기 ──
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        p.fillRect(self.rect(), QColor("#0f172a"))
+
+        if not self._image:
+            p.setPen(QColor("#475569"))
+            p.setFont(QFont("Segoe UI", 14))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "이미지를 드래그하여 놓으세요")
+            p.end()
+            return
+
+        # 체커보드 (투명 영역 표시)
+        iw = int(self._image.width() * self._scale)
+        ih = int(self._image.height() * self._scale)
+        ox, oy = int(self._offset_x), int(self._offset_y)
+        checker = 12
+        c1, c2 = QColor("#1e293b"), QColor("#334155")
+        for row in range(0, ih, checker):
+            for col in range(0, iw, checker):
+                color = c1 if (row // checker + col // checker) % 2 == 0 else c2
+                rx = ox + col
+                ry = oy + row
+                rw = min(checker, iw - col)
+                rh = min(checker, ih - row)
+                p.fillRect(rx, ry, rw, rh, color)
+
+        # 이미지 그리기
+        p.drawImage(ox, oy, self._image.scaled(
+            iw, ih, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation
+        ))
+
+        # 인페인트 마스크 오버레이 (빨간 반투명)
+        if self._mask and self._tool == self.TOOL_INPAINT:
+            p.drawImage(ox, oy, self._mask.scaled(
+                iw, ih, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation
+            ))
+
+        # 브러시 커서 미리보기
+        if self._tool != self.TOOL_NONE and self.underMouse():
+            cursor = self.mapFromGlobal(QCursor.pos())
+            r = int(self._brush_size / 2)
+            _cursor_colors = {
+                self.TOOL_ERASER: QColor("#ef4444"),
+                self.TOOL_RESTORE: QColor("#22c55e"),
+                self.TOOL_INPAINT: QColor("#f59e0b"),
+            }
+            color = _cursor_colors.get(self._tool, QColor("#ef4444"))
+            p.setPen(QPen(color, 1.5, Qt.PenStyle.DashLine))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(cursor, r, r)
+
+        p.end()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._image:
+            self._fit_image()
+
+
+class BgRemovePage(QWidget):
+    """배경 제거 페이지 – 드래그앤드롭 → 자동 제거 → 지우개 후처리 → PNG 다운로드"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self._worker: _BgRemoveWorker | None = None
+        self._inpaint_worker: _InpaintWorker | None = None
+        self._original_path: str = ""
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # ═══ 전체 배경 ═══
+        self.setStyleSheet("background: #0c1322;")
+
+        # ═══ 상단 바: 미니멀 헤더 ═══
+        header_bar = QFrame()
+        header_bar.setFixedHeight(48)
+        header_bar.setStyleSheet("""
+            QFrame { background: #111827; border: none; border-bottom: 1px solid #1f2937; }
+        """)
+        hbar = QHBoxLayout(header_bar)
+        hbar.setContentsMargins(20, 0, 20, 0)
+        hbar.setSpacing(12)
+
+        title = QLabel("배경 제거")
+        title.setFont(QFont("Segoe UI Semibold", 13))
+        title.setStyleSheet("color: #f1f5f9; background: transparent; border: none;")
+        hbar.addWidget(title)
+
+        subtitle = QLabel("AI 자동 제거 + 수동 지우개")
+        subtitle.setStyleSheet("color: #4b5563; font-size: 11px; background: transparent; border: none;")
+        hbar.addWidget(subtitle)
+        hbar.addStretch()
+
+        # 상태 텍스트 (헤더 우측)
+        self._status = QLabel("")
+        self._status.setStyleSheet("color: #6b7280; font-size: 11px; background: transparent; border: none;")
+        hbar.addWidget(self._status)
+
+        # 프로그레스 (헤더 아래에 오버레이)
+        self._progress = QProgressBar()
+        self._progress.setFixedHeight(2)
+        self._progress.setRange(0, 0)
+        self._progress.setStyleSheet("""
+            QProgressBar { background: transparent; border: none; }
+            QProgressBar::chunk { background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #6366f1, stop:1 #a78bfa); }
+        """)
+        self._progress.hide()
+
+        layout.addWidget(header_bar)
+        layout.addWidget(self._progress)
+
+        # ═══ 메인 캔버스 영역 (전체 채움) ═══
+        canvas_container = QWidget()
+        canvas_container.setStyleSheet("background: #0c1322; border: none;")
+        canvas_main = QVBoxLayout(canvas_container)
+        canvas_main.setContentsMargins(0, 0, 0, 0)
+        canvas_main.setSpacing(0)
+
+        self._stack = QStackedWidget()
+        self._stack.setStyleSheet("background: transparent;")
+
+        # ── 드롭존 (세련된 디자인) ──
+        self._dropzone = QWidget()
+        drop_layout = QVBoxLayout(self._dropzone)
+        drop_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        drop_layout.setSpacing(0)
+        self._dropzone.setStyleSheet("background: #0c1322;")
+
+        # 드롭 카드 (중앙 고정 크기)
+        drop_card = QFrame()
+        drop_card.setObjectName("dropCard")
+        drop_card.setFixedSize(360, 280)
+        drop_card.setStyleSheet("""
+            QFrame#dropCard {
+                background: #111827;
+                border: 2px dashed #1f2937;
+                border-radius: 20px;
+            }
+            QFrame#dropCard:hover {
+                border-color: #6366f1;
+                background: #0f1729;
+            }
+        """)
+        dc_layout = QVBoxLayout(drop_card)
+        dc_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        dc_layout.setSpacing(16)
+
+        # 아이콘 원형 배경
+        icon_bg = QLabel("🖼️")
+        icon_bg.setFixedSize(72, 72)
+        icon_bg.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_bg.setFont(QFont("Segoe UI", 30))
+        icon_bg.setStyleSheet("""
+            background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #1e1b4b, stop:1 #172554);
+            border: none; border-radius: 36px;
+        """)
+        dc_layout.addWidget(icon_bg, 0, Qt.AlignmentFlag.AlignCenter)
+
+        drop_title = QLabel("이미지를 드래그하세요")
+        drop_title.setFont(QFont("Segoe UI Semibold", 14))
+        drop_title.setStyleSheet("color: #e5e7eb; background: transparent; border: none;")
+        drop_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        dc_layout.addWidget(drop_title)
+
+        drop_sub = QLabel("또는 아래 버튼으로 파일을 선택하세요")
+        drop_sub.setStyleSheet("color: #4b5563; font-size: 11px; background: transparent; border: none;")
+        drop_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        dc_layout.addWidget(drop_sub)
+
+        # 파일 선택 버튼 (드롭존 안에)
+        self._btn_new = QPushButton("파일 선택")
+        self._btn_new.setFixedSize(140, 36)
+        self._btn_new.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_new.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4f46e5, stop:1 #7c3aed);
+                color: white; border: none; border-radius: 18px;
+                font-size: 12px; font-weight: 600;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #6366f1, stop:1 #8b5cf6);
+            }
+        """)
+        self._btn_new.clicked.connect(self._open_image)
+        dc_layout.addWidget(self._btn_new, 0, Qt.AlignmentFlag.AlignCenter)
+
+        drop_fmt = QLabel("PNG · JPG · WEBP · BMP")
+        drop_fmt.setStyleSheet("color: #374151; font-size: 10px; background: transparent; border: none;")
+        drop_fmt.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        dc_layout.addWidget(drop_fmt)
+
+        drop_layout.addWidget(drop_card, 0, Qt.AlignmentFlag.AlignCenter)
+        self._stack.addWidget(self._dropzone)
+
+        # ── 캔버스 + 플로팅 툴바 ──
+        canvas_page = QWidget()
+        canvas_page.setStyleSheet("background: #0c1322;")
+        cp_layout = QVBoxLayout(canvas_page)
+        cp_layout.setContentsMargins(0, 0, 0, 0)
+        cp_layout.setSpacing(0)
+
+        # 플로팅 툴바
+        toolbar_wrap = QWidget()
+        toolbar_wrap.setFixedHeight(52)
+        toolbar_wrap.setStyleSheet("background: #111827; border: none; border-bottom: 1px solid #1f2937;")
+        toolbar = QHBoxLayout(toolbar_wrap)
+        toolbar.setContentsMargins(12, 0, 12, 0)
+        toolbar.setSpacing(4)
+
+        # 공통 버튼 스타일
+        _tbtn = """
+            QPushButton {{
+                background: {bg}; color: {fg}; border: {bd};
+                border-radius: 8px; padding: 4px 12px; font-size: 11px; font-weight: 600;
+                min-height: 30px;
+            }}
+            QPushButton:hover {{ background: {hover}; color: #f1f5f9; }}
+            {extra}
+        """
+
+        self._btn_remove = QPushButton("✨ BG제거")
+        self._btn_remove.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_remove.setStyleSheet(_tbtn.format(
+            bg="qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4f46e5, stop:1 #7c3aed)",
+            fg="white", bd="none",
+            hover="qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #6366f1, stop:1 #8b5cf6)",
+            extra="QPushButton:disabled { background: #1f2937; color: #374151; }"
+        ))
+        self._btn_remove.clicked.connect(self._do_remove_bg)
+        self._btn_remove.setEnabled(False)
+        toolbar.addWidget(self._btn_remove)
+
+        # 세로 구분선
+        def _vsep():
+            s = QFrame()
+            s.setFixedSize(1, 24)
+            s.setStyleSheet("background: #1f2937; border: none;")
+            return s
+
+        toolbar.addWidget(_vsep())
+
+        self._btn_eraser = QPushButton("⊘ 지우개")
+        self._btn_eraser.setCheckable(True)
+        self._btn_eraser.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_eraser.setStyleSheet(_tbtn.format(
+            bg="transparent", fg="#9ca3af", bd="1px solid #1f2937",
+            hover="#1f2937",
+            extra="QPushButton:checked { background: #dc2626; color: white; border-color: #dc2626; }"
+        ))
+        self._btn_eraser.toggled.connect(self._toggle_eraser)
+        self._btn_eraser.setEnabled(False)
+        toolbar.addWidget(self._btn_eraser)
+
+        # 복원 브러시
+        self._btn_restore = QPushButton("🖌 복원")
+        self._btn_restore.setCheckable(True)
+        self._btn_restore.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_restore.setStyleSheet(_tbtn.format(
+            bg="transparent", fg="#9ca3af", bd="1px solid #1f2937",
+            hover="#1f2937",
+            extra="QPushButton:checked { background: #059669; color: white; border-color: #059669; }"
+        ))
+        self._btn_restore.toggled.connect(self._toggle_restore)
+        self._btn_restore.setEnabled(False)
+        toolbar.addWidget(self._btn_restore)
+
+        toolbar.addWidget(_vsep())
+
+        # 자막지우개 (인페인트)
+        self._btn_inpaint = QPushButton("Aa 자막제거")
+        self._btn_inpaint.setCheckable(True)
+        self._btn_inpaint.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_inpaint.setStyleSheet(_tbtn.format(
+            bg="transparent", fg="#9ca3af", bd="1px solid #1f2937",
+            hover="#1f2937",
+            extra="QPushButton:checked { background: #d97706; color: white; border-color: #d97706; }"
+        ))
+        self._btn_inpaint.toggled.connect(self._toggle_inpaint)
+        self._btn_inpaint.setEnabled(False)
+        toolbar.addWidget(self._btn_inpaint)
+
+        # 인페인트 적용 버튼
+        self._btn_inpaint_apply = QPushButton("✨ 적용")
+        self._btn_inpaint_apply.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_inpaint_apply.setStyleSheet(_tbtn.format(
+            bg="qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #d97706, stop:1 #f59e0b)",
+            fg="white", bd="none",
+            hover="qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #f59e0b, stop:1 #fbbf24)",
+            extra="QPushButton:disabled { background: #1f2937; color: #374151; }"
+        ))
+        self._btn_inpaint_apply.clicked.connect(self._do_inpaint)
+        self._btn_inpaint_apply.setEnabled(False)
+        self._btn_inpaint_apply.hide()
+        toolbar.addWidget(self._btn_inpaint_apply)
+
+        # 마스크 초기화 버튼
+        self._btn_mask_clear = QPushButton("✕ 초기화")
+        self._btn_mask_clear.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_mask_clear.setStyleSheet(_tbtn.format(
+            bg="transparent", fg="#9ca3af", bd="1px solid #1f2937",
+            hover="#1f2937", extra=""
+        ))
+        self._btn_mask_clear.clicked.connect(self._clear_mask)
+        self._btn_mask_clear.hide()
+        toolbar.addWidget(self._btn_mask_clear)
+
+        # 브러시 크기
+        size_label = QLabel("크기")
+        size_label.setStyleSheet("color: #4b5563; font-size: 10px; background: transparent; border: none; margin-left: 4px;")
+        toolbar.addWidget(size_label)
+
+        self._slider_size = QSlider(Qt.Orientation.Horizontal)
+        self._slider_size.setRange(4, 100)
+        self._slider_size.setValue(20)
+        self._slider_size.setFixedWidth(90)
+        self._slider_size.setStyleSheet("""
+            QSlider { background: transparent; border: none; }
+            QSlider::groove:horizontal {
+                height: 3px; background: #1f2937; border-radius: 1px;
+            }
+            QSlider::handle:horizontal {
+                width: 12px; height: 12px; margin: -5px 0;
+                background: #818cf8; border-radius: 6px;
+            }
+            QSlider::handle:horizontal:hover { background: #a78bfa; }
+        """)
+        self._slider_size.valueChanged.connect(self._on_size_changed)
+        toolbar.addWidget(self._slider_size)
+
+        self._size_val = QLabel("20")
+        self._size_val.setFixedWidth(24)
+        self._size_val.setStyleSheet("color: #6b7280; font-size: 10px; background: transparent; border: none;")
+        toolbar.addWidget(self._size_val)
+
+        toolbar.addWidget(_vsep())
+
+        self._btn_undo = QPushButton("↩")
+        self._btn_undo.setToolTip("되돌리기 (Undo)")
+        self._btn_undo.setFixedWidth(40)
+        self._btn_undo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_undo.setStyleSheet(_tbtn.format(
+            bg="transparent", fg="#9ca3af", bd="1px solid #1f2937",
+            hover="#1f2937", extra=""
+        ))
+        self._btn_undo.clicked.connect(self._undo)
+        self._btn_undo.setEnabled(False)
+        toolbar.addWidget(self._btn_undo)
+
+        self._btn_redo = QPushButton("↪")
+        self._btn_redo.setToolTip("앞으로 (Redo)")
+        self._btn_redo.setFixedWidth(40)
+        self._btn_redo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_redo.setStyleSheet(_tbtn.format(
+            bg="transparent", fg="#9ca3af", bd="1px solid #1f2937",
+            hover="#1f2937", extra=""
+        ))
+        self._btn_redo.clicked.connect(self._redo)
+        self._btn_redo.setEnabled(False)
+        toolbar.addWidget(self._btn_redo)
+
+        # 새 이미지
+        self._btn_open2 = QPushButton("📂 열기")
+        self._btn_open2.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_open2.setStyleSheet(_tbtn.format(
+            bg="transparent", fg="#9ca3af", bd="1px solid #1f2937",
+            hover="#1f2937", extra=""
+        ))
+        self._btn_open2.clicked.connect(self._open_image)
+        toolbar.addWidget(self._btn_open2)
+
+        toolbar.addStretch()
+
+        self._btn_download = QPushButton("PNG 저장")
+        self._btn_download.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_download.setStyleSheet(_tbtn.format(
+            bg="#059669", fg="white", bd="none",
+            hover="#10b981",
+            extra="QPushButton:disabled { background: #1f2937; color: #374151; }"
+        ))
+        self._btn_download.clicked.connect(self._save_png)
+        self._btn_download.setEnabled(False)
+        toolbar.addWidget(self._btn_download)
+
+        cp_layout.addWidget(toolbar_wrap)
+
+        # 캔버스
+        self._canvas = _BgCanvas()
+        cp_layout.addWidget(self._canvas, 1)
+
+        self._stack.addWidget(canvas_page)
+
+        canvas_main.addWidget(self._stack, 1)
+        layout.addWidget(canvas_container, 1)
+
+        # 초기 상태: 드롭존
+        self._stack.setCurrentIndex(0)
+
+    # ── 드래그앤드롭 ──
+    _DROP_NORMAL = """
+        QFrame#dropCard {
+            background: #111827;
+            border: 2px dashed #1f2937;
+            border-radius: 20px;
+        }
+    """
+    _DROP_ACTIVE = """
+        QFrame#dropCard {
+            background: #0f1729;
+            border: 2px dashed #6366f1;
+            border-radius: 20px;
+        }
+    """
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.toLocalFile().lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp')):
+                    event.acceptProposedAction()
+                    card = self._dropzone.findChild(QFrame, "dropCard")
+                    if card:
+                        card.setStyleSheet(self._DROP_ACTIVE)
+                    return
+
+    def dragLeaveEvent(self, event):
+        card = self._dropzone.findChild(QFrame, "dropCard")
+        if card:
+            card.setStyleSheet(self._DROP_NORMAL)
+
+    def dropEvent(self, event):
+        card = self._dropzone.findChild(QFrame, "dropCard")
+        if card:
+            card.setStyleSheet(self._DROP_NORMAL)
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp')):
+                self._load_image(path)
+                return
+
+    # ── 이미지 로드 ──
+    def _open_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "이미지 열기", "",
+            "이미지 파일 (*.png *.jpg *.jpeg *.webp *.bmp);;모든 파일 (*)"
+        )
+        if path:
+            self._load_image(path)
+
+    def _load_image(self, path: str):
+        self._original_path = path
+        qimg = QImage(path)
+        if qimg.isNull():
+            self._status.setText("❌ 이미지를 읽을 수 없습니다")
+            return
+
+        self._canvas.set_original(qimg)
+        self._canvas.set_image(qimg)
+        self._stack.setCurrentIndex(1)
+        self._btn_remove.setEnabled(True)
+        self._btn_eraser.setEnabled(False)
+        self._btn_eraser.setChecked(False)
+        self._btn_restore.setEnabled(False)
+        self._btn_restore.setChecked(False)
+        self._btn_inpaint.setEnabled(True)
+        self._btn_inpaint.setChecked(False)
+        self._btn_inpaint_apply.setEnabled(False)
+        self._btn_inpaint_apply.hide()
+        self._btn_mask_clear.hide()
+        self._btn_undo.setEnabled(False)
+        self._btn_redo.setEnabled(False)
+        self._btn_download.setEnabled(True)
+        fname = os.path.basename(path)
+        self._status.setText(f"📷 {fname}  ({qimg.width()}×{qimg.height()})")
+
+    # ── 배경 제거 실행 ──
+    def _do_remove_bg(self):
+        if not self._original_path:
+            return
+        self._btn_remove.setEnabled(False)
+        self._progress.show()
+        self._status.setText("⏳ 배경 제거 처리 중...")
+
+        self._worker = _BgRemoveWorker(self._original_path)
+        self._worker.status.connect(self._on_worker_status)
+        self._worker.finished.connect(self._on_bg_removed)
+        self._worker.error.connect(self._on_bg_error)
+        self._worker.start()
+
+    def _on_worker_status(self, msg: str):
+        self._status.setText(f"⏳ {msg}")
+
+    def _on_bg_removed(self, result_img: QImage):
+        self._progress.hide()
+        self._canvas.set_image(result_img, keep_undo=True)
+        self._btn_remove.setEnabled(True)
+        self._btn_eraser.setEnabled(True)
+        self._btn_restore.setEnabled(True)
+        self._btn_download.setEnabled(True)
+        self._update_undo_redo_btns()
+        w, h = result_img.width(), result_img.height()
+        self._status.setText(f"✅ 배경 제거 완료  ({w}×{h}) — 🖌복원으로 잘린 부분 살리기 / ⊘지우개로 남은 배경 지우기")
+        self._worker = None
+
+    def _on_bg_error(self, err: str):
+        self._progress.hide()
+        self._btn_remove.setEnabled(True)
+        self._status.setText(f"❌ 오류: {err}")
+        self._worker = None
+
+    # ── 도구 토글 (상호 배타적) ──
+    def _uncheck_others(self, *buttons):
+        for btn in buttons:
+            btn.blockSignals(True)
+            btn.setChecked(False)
+            btn.blockSignals(False)
+
+    def _toggle_eraser(self, on: bool):
+        if on:
+            self._uncheck_others(self._btn_restore, self._btn_inpaint)
+            self._canvas.set_tool(_BgCanvas.TOOL_ERASER)
+            self._btn_inpaint_apply.hide()
+            self._btn_mask_clear.hide()
+        elif not self._btn_restore.isChecked() and not self._btn_inpaint.isChecked():
+            self._canvas.set_tool(_BgCanvas.TOOL_NONE)
+
+    def _toggle_restore(self, on: bool):
+        if on:
+            self._uncheck_others(self._btn_eraser, self._btn_inpaint)
+            self._canvas.set_tool(_BgCanvas.TOOL_RESTORE)
+            self._btn_inpaint_apply.hide()
+            self._btn_mask_clear.hide()
+        elif not self._btn_eraser.isChecked() and not self._btn_inpaint.isChecked():
+            self._canvas.set_tool(_BgCanvas.TOOL_NONE)
+
+    def _toggle_inpaint(self, on: bool):
+        if on:
+            self._uncheck_others(self._btn_eraser, self._btn_restore)
+            self._canvas.set_tool(_BgCanvas.TOOL_INPAINT)
+            self._btn_inpaint_apply.show()
+            self._btn_inpaint_apply.setEnabled(True)
+            self._btn_mask_clear.show()
+            self._status.setText("🔤 자막/텍스트 영역을 브러시로 칠한 후 [✨ 적용] 클릭")
+        else:
+            if not self._btn_eraser.isChecked() and not self._btn_restore.isChecked():
+                self._canvas.set_tool(_BgCanvas.TOOL_NONE)
+            self._btn_inpaint_apply.hide()
+            self._btn_mask_clear.hide()
+
+    def _clear_mask(self):
+        self._canvas.clear_mask()
+        self._status.setText("🔤 마스크 초기화됨 — 다시 칠해주세요")
+
+    # ── 인페인팅 실행 ──
+    def _do_inpaint(self):
+        if not self._canvas.get_image() or not self._canvas.has_mask_content():
+            self._status.setText("⚠️ 먼저 제거할 자막 영역을 칠해주세요")
+            return
+
+        import tempfile as _tf
+
+        # 이미지 저장
+        img_fd, img_path = _tf.mkstemp(suffix=".png")
+        os.close(img_fd)
+        self._canvas.get_image().save(img_path, "PNG")
+
+        # 마스크 저장 (RGBA PNG — 헬퍼에서 알파>0 을 흰색으로 변환)
+        mask_fd, mask_path = _tf.mkstemp(suffix=".png")
+        os.close(mask_fd)
+        self._canvas.get_mask().save(mask_path, "PNG")
+
+        self._inpaint_img_path = img_path
+        self._inpaint_mask_path = mask_path
+        self._btn_inpaint_apply.setEnabled(False)
+        self._progress.show()
+        self._status.setText("⏳ 자막 제거 처리 중...")
+
+        self._inpaint_worker = _InpaintWorker(img_path, mask_path)
+        self._inpaint_worker.finished.connect(self._on_inpaint_done)
+        self._inpaint_worker.error.connect(self._on_inpaint_error)
+        self._inpaint_worker.start()
+
+    def _on_inpaint_done(self, result_img: QImage):
+        self._progress.hide()
+        self._canvas.set_image(result_img, keep_undo=True)
+        self._canvas.clear_mask()
+        self._btn_inpaint_apply.setEnabled(True)
+        self._update_undo_redo_btns()
+        w, h = result_img.width(), result_img.height()
+        self._status.setText(f"✅ 자막 제거 완료  ({w}×{h}) — 더 지울 영역이 있으면 다시 칠해주세요")
+        self._inpaint_worker = None
+        # 임시 파일 정리
+        for p in (getattr(self, '_inpaint_img_path', ''), getattr(self, '_inpaint_mask_path', '')):
+            try: os.remove(p)
+            except: pass
+
+    def _on_inpaint_error(self, err: str):
+        self._progress.hide()
+        self._btn_inpaint_apply.setEnabled(True)
+        self._status.setText(f"❌ 인페인팅 오류: {err}")
+        self._inpaint_worker = None
+        for p in (getattr(self, '_inpaint_img_path', ''), getattr(self, '_inpaint_mask_path', '')):
+            try: os.remove(p)
+            except: pass
+
+    def _on_size_changed(self, val: int):
+        self._size_val.setText(f"{val}")
+        self._canvas.set_brush_size(val)
+
+    def _undo(self):
+        self._canvas.undo()
+        self._update_undo_redo_btns()
+
+    def _redo(self):
+        self._canvas.redo()
+        self._update_undo_redo_btns()
+
+    def _update_undo_redo_btns(self):
+        self._btn_undo.setEnabled(self._canvas.can_undo())
+        self._btn_redo.setEnabled(self._canvas.can_redo())
+
+    # ── PNG 저장 ──
+    def _save_png(self):
+        img = self._canvas.get_image()
+        if not img:
+            return
+        base = os.path.splitext(os.path.basename(self._original_path))[0]
+        default_name = f"{base}_no_bg.png"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "투명 PNG 저장", default_name,
+            "PNG 이미지 (*.png)"
+        )
+        if path:
+            img.save(path, "PNG")
+            self._status.setText(f"💾 저장 완료: {path}")
+
+
 class MainShell(QMainWindow):
     """메인 셸 - 왼쪽 네비게이션 바 + 콘텐츠 페이지"""
 
@@ -3085,6 +4834,16 @@ class MainShell(QMainWindow):
         nav_layout.addWidget(download_btn)
         self.nav_buttons.append(download_btn)
 
+        color_btn = NavButton("🎨", "Color")
+        color_btn.clicked.connect(lambda: self.switch_page(2))
+        nav_layout.addWidget(color_btn)
+        self.nav_buttons.append(color_btn)
+
+        bg_btn = NavButton("🧽", "BG Remove")
+        bg_btn.clicked.connect(lambda: self.switch_page(3))
+        nav_layout.addWidget(bg_btn)
+        self.nav_buttons.append(bg_btn)
+
         nav_layout.addStretch()
 
         # 버전 표시
@@ -3101,6 +4860,12 @@ class MainShell(QMainWindow):
 
         self.downloader = DownloaderPage(app_settings=self.app_settings)
         self.page_stack.addWidget(self.downloader)
+
+        self.color_picker = ColorPickerPage()
+        self.page_stack.addWidget(self.color_picker)
+
+        self.bg_remover = BgRemovePage()
+        self.page_stack.addWidget(self.bg_remover)
 
         main_layout.addWidget(self.page_stack, 1)
 
@@ -3299,6 +5064,10 @@ def main():
 
 
 if __name__ == "__main__":
+    import faulthandler
+    _fh_log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qfred_crash.log")
+    _fh_file = open(_fh_log, 'w', encoding='utf-8')
+    faulthandler.enable(file=_fh_file)
     try:
         main()
     except Exception as e:
