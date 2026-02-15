@@ -16,6 +16,21 @@ if getattr(sys, 'frozen', False):
 import pyperclip
 import yt_dlp
 import uuid
+import shutil
+import winreg
+from urllib.parse import urlparse, parse_qs
+
+
+def _find_ffmpeg() -> str:
+    """ffmpeg 바이너리 경로 반환. 없으면 빈 문자열."""
+    path = shutil.which('ffmpeg')
+    if path:
+        return path
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return ''
 import ctypes
 import ctypes.wintypes
 import winreg
@@ -204,6 +219,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QProgressBar, QGridLayout, QSlider
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QObject, QTimer, QEvent, QThread, QPoint
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtGui import (
     QIcon, QPixmap, QFont, QColor, QPalette, QAction, QFontDatabase, QCursor,
     QImage, QPainter, QPen, QBrush
@@ -352,6 +368,29 @@ class AppSettings:
             winreg.CloseKey(key)
         except Exception as e:
             print(f"[AppSettings] 레지스트리 오류: {e}")
+
+    def register_protocol(self):
+        """tubiq:// 프로토콜을 Windows 레지스트리에 등록"""
+        try:
+            if getattr(sys, 'frozen', False):
+                exe_cmd = f'"{sys.executable}" "%1"'
+            else:
+                exe_cmd = f'"{sys.executable}" "{os.path.abspath(__file__)}" "%1"'
+
+            key_path = r"Software\Classes\tubiq"
+            # 기본 키 생성
+            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path)
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "URL:TubiQ Protocol")
+            winreg.SetValueEx(key, "URL Protocol", 0, winreg.REG_SZ, "")
+            winreg.CloseKey(key)
+
+            # shell\open\command 키 생성
+            cmd_key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path + r"\shell\open\command")
+            winreg.SetValueEx(cmd_key, "", 0, winreg.REG_SZ, exe_cmd)
+            winreg.CloseKey(cmd_key)
+            print(f"[AppSettings] tubiq:// 프로토콜 등록 완료: {exe_cmd}")
+        except Exception as e:
+            print(f"[AppSettings] 프로토콜 등록 실패: {e}")
 
     def is_registered_startup(self) -> bool:
         """시작 프로그램에 등록되어 있는지 확인"""
@@ -2110,24 +2149,20 @@ class DownloadWorker(QThread):
     finished = pyqtSignal(dict)   # {'success': bool, 'title': str, 'path': str, 'error': str}
     info_ready = pyqtSignal(dict) # {'title': str, 'duration': str, 'thumbnail': str}
 
-    def __init__(self, url, output_path, audio_only=False):
+    def __init__(self, url, output_path, mode='video'):
         super().__init__()
         self.url = url
         self.output_path = output_path
-        self.audio_only = audio_only
+        self.mode = mode  # 'video' | 'audio' | 'subtitle'
         self._cancelled = False
 
     def cancel(self):
         self._cancelled = True
 
-    @staticmethod
-    def _has_ffmpeg():
-        import shutil
-        return shutil.which('ffmpeg') is not None
-
     def run(self):
         try:
-            has_ffmpeg = self._has_ffmpeg()
+            ffmpeg_path = _find_ffmpeg()
+            has_ffmpeg = bool(ffmpeg_path)
             ydl_opts = {
                 'outtmpl': os.path.join(self.output_path, '%(title)s.%(ext)s'),
                 'quiet': True,
@@ -2135,8 +2170,21 @@ class DownloadWorker(QThread):
                 'progress_hooks': [self._progress_hook],
                 'noplaylist': True,
             }
+            if ffmpeg_path:
+                ydl_opts['ffmpeg_location'] = ffmpeg_path
 
-            if self.audio_only:
+            if self.mode == 'subtitle':
+                ydl_opts['writesubtitles'] = True
+                ydl_opts['writeautomaticsub'] = True
+                ydl_opts['subtitleslangs'] = ['ko', 'en', 'ja']
+                ydl_opts['subtitlesformat'] = 'srt/ass/vtt/best'
+                ydl_opts['skip_download'] = True
+                if has_ffmpeg:
+                    ydl_opts['postprocessors'] = [{
+                        'key': 'FFmpegSubtitlesConvertor',
+                        'format': 'srt',
+                    }]
+            elif self.mode == 'audio':
                 if has_ffmpeg:
                     ydl_opts['format'] = 'bestaudio/best'
                     ydl_opts['postprocessors'] = [{
@@ -2146,12 +2194,11 @@ class DownloadWorker(QThread):
                     }]
                 else:
                     ydl_opts['format'] = 'bestaudio/best'
-            else:
+            else:  # video
                 if has_ffmpeg:
                     ydl_opts['format'] = 'bestvideo+bestaudio/best'
                     ydl_opts['merge_output_format'] = 'mp4'
                 else:
-                    # ffmpeg 없으면 머지 불필요한 단일 포맷
                     ydl_opts['format'] = 'best'
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -2170,10 +2217,21 @@ class DownloadWorker(QThread):
                     self.finished.emit({'success': False, 'title': title, 'path': '', 'error': 'Cancelled'})
                     return
 
+                # 자막 모드: 자막 없으면 에러
+                if self.mode == 'subtitle':
+                    subs = info.get('subtitles', {})
+                    auto_subs = info.get('automatic_captions', {})
+                    if not subs and not auto_subs:
+                        self.finished.emit({'success': False, 'title': title, 'path': '', 'error': '자막을 찾을 수 없습니다'})
+                        return
+                    self.progress.emit({'percent': 30.0, 'speed': '', 'eta': ''})
+
                 # 다운로드 실행
                 ydl.download([self.url])
 
             if not self._cancelled:
+                if self.mode == 'subtitle':
+                    self.progress.emit({'percent': 100.0, 'speed': '', 'eta': ''})
                 self.finished.emit({'success': True, 'title': title, 'path': self.output_path, 'error': ''})
         except Exception as e:
             self.finished.emit({'success': False, 'title': '', 'path': '', 'error': str(e)})
@@ -2431,6 +2489,618 @@ class DownloadItemCard(QFrame):
         self.speed_label.setText("")
 
 
+class FrameExtractWorker(QThread):
+    """영상에서 프레임 이미지 추출 워커 (yt-dlp 다운로드 → ffmpeg 추출)"""
+    progress = pyqtSignal(dict)
+    finished = pyqtSignal(dict)
+    info_ready = pyqtSignal(dict)
+
+    def __init__(self, url, output_path, interval=1.0, img_format='webp'):
+        super().__init__()
+        self.url = url
+        self.output_path = output_path
+        self.interval = interval          # 초 단위
+        self.img_format = img_format      # webp, jpg, png
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        try:
+            ffmpeg_bin = _find_ffmpeg()
+            if not ffmpeg_bin:
+                self.finished.emit({'success': False, 'title': '', 'path': '', 'error': 'ffmpeg가 설치되어 있지 않습니다'})
+                return
+
+            # 1단계: 영상 정보 + 다운로드
+            tmp_dir = os.path.join(self.output_path, '_tmp_frames')
+            os.makedirs(tmp_dir, exist_ok=True)
+            tmp_video = os.path.join(tmp_dir, 'video.%(ext)s')
+
+            ydl_opts = {
+                'outtmpl': tmp_video,
+                'format': 'best',
+                'quiet': True,
+                'no_warnings': True,
+                'noplaylist': True,
+                'progress_hooks': [self._dl_hook],
+            }
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(self.url, download=False)
+                title = info.get('title', 'Unknown')
+                duration = info.get('duration') or 0
+                dur_str = f"{int(duration) // 60}:{int(duration) % 60:02d}" if duration else ""
+                self.info_ready.emit({'title': title, 'duration': dur_str, 'thumbnail': info.get('thumbnail', '')})
+
+                if self._cancelled:
+                    self._cleanup(tmp_dir)
+                    self.finished.emit({'success': False, 'title': title, 'path': '', 'error': 'Cancelled'})
+                    return
+
+                ydl.download([self.url])
+
+            if self._cancelled:
+                self._cleanup(tmp_dir)
+                self.finished.emit({'success': False, 'title': title, 'path': '', 'error': 'Cancelled'})
+                return
+
+            # 다운로드된 파일 찾기
+            video_file = None
+            for f in os.listdir(tmp_dir):
+                if f.startswith('video.'):
+                    video_file = os.path.join(tmp_dir, f)
+                    break
+            if not video_file:
+                self._cleanup(tmp_dir)
+                self.finished.emit({'success': False, 'title': title, 'path': '', 'error': '영상 파일을 찾을 수 없습니다'})
+                return
+
+            # 2단계: ffmpeg로 프레임 추출
+            self.progress.emit({'percent': 60.0, 'speed': '프레임 추출 중...', 'eta': ''})
+
+            # 안전한 폴더명
+            safe_title = "".join(c for c in title if c not in r'<>:"/\|?*').strip()[:60] or 'frames'
+            frames_dir = os.path.join(self.output_path, f"{safe_title}_frames")
+            os.makedirs(frames_dir, exist_ok=True)
+
+            ext = self.img_format
+            if ext == 'jpg':
+                ext = 'jpg'
+                codec_args = ['-q:v', '2']
+            elif ext == 'png':
+                codec_args = []
+            else:  # webp
+                codec_args = ['-quality', '85']
+
+            cmd = [
+                ffmpeg_bin, '-i', video_file,
+                '-vf', f'fps=1/{self.interval}',
+                *codec_args,
+                os.path.join(frames_dir, f'frame_%04d.{ext}'),
+                '-y', '-hide_banner', '-loglevel', 'error',
+            ]
+
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0)
+
+            # 임시 파일 정리
+            self._cleanup(tmp_dir)
+
+            if proc.returncode != 0:
+                self.finished.emit({'success': False, 'title': title, 'path': '', 'error': f'ffmpeg 오류: {proc.stderr[:100]}'})
+                return
+
+            # 추출된 파일 수
+            frame_count = len([f for f in os.listdir(frames_dir) if f.startswith('frame_')])
+            self.progress.emit({'percent': 100.0, 'speed': '', 'eta': ''})
+            self.finished.emit({'success': True, 'title': f"{title} ({frame_count}장)", 'path': frames_dir, 'error': ''})
+
+        except Exception as e:
+            self.finished.emit({'success': False, 'title': '', 'path': '', 'error': str(e)})
+
+    def _dl_hook(self, d):
+        if self._cancelled:
+            raise yt_dlp.utils.DownloadCancelled()
+        if d['status'] == 'downloading':
+            percent = 0.0
+            if d.get('total_bytes'):
+                percent = d.get('downloaded_bytes', 0) / d['total_bytes'] * 100
+            elif d.get('total_bytes_estimate'):
+                percent = d.get('downloaded_bytes', 0) / d['total_bytes_estimate'] * 100
+            # 다운로드는 전체의 0~55% 구간
+            self.progress.emit({'percent': percent * 0.55, 'speed': d.get('_speed_str', '').strip(), 'eta': d.get('_eta_str', '').strip()})
+        elif d['status'] == 'finished':
+            self.progress.emit({'percent': 55.0, 'speed': '', 'eta': ''})
+
+    @staticmethod
+    def _cleanup(tmp_dir):
+        import shutil
+        import time
+        for attempt in range(3):
+            try:
+                shutil.rmtree(tmp_dir)
+                return
+            except Exception:
+                time.sleep(0.5)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+class FrameExtractDialog(QDialog):
+    """이미지 추출 설정 다이얼로그"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("이미지 추출 설정")
+        self.setFixedSize(400, 360)
+        self.setStyleSheet("""
+            QDialog { background-color: #0f172a; }
+            QLabel { color: #e2e8f0; }
+        """)
+        self.interval = 1.0
+        self.img_format = 'webp'
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 20)
+        layout.setSpacing(16)
+
+        title = QLabel("🖼  이미지 추출")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffffff;")
+        layout.addWidget(title)
+
+        desc = QLabel("영상에서 일정 간격으로 프레임을 추출합니다")
+        desc.setStyleSheet("font-size: 11px; color: #94a3b8;")
+        layout.addWidget(desc)
+
+        # 추출 간격
+        iv_header = QHBoxLayout()
+        iv_label = QLabel("추출 간격")
+        iv_label.setStyleSheet("font-size: 13px; font-weight: bold;")
+        iv_header.addWidget(iv_label)
+        iv_header.addStretch()
+        self.iv_value = QLabel("1초마다")
+        self.iv_value.setStyleSheet("font-size: 13px; color: #4a946c; font-weight: bold;")
+        iv_header.addWidget(self.iv_value)
+        layout.addLayout(iv_header)
+
+        from PyQt6.QtWidgets import QSlider
+        self.iv_slider = QSlider(Qt.Orientation.Horizontal)
+        self.iv_slider.setRange(1, 30)
+        self.iv_slider.setValue(1)
+        self.iv_slider.setStyleSheet("""
+            QSlider::groove:horizontal { height: 4px; background: #334155; border-radius: 2px; }
+            QSlider::handle:horizontal { width: 16px; height: 16px; margin: -6px 0; border-radius: 8px; background: #4a946c; }
+            QSlider::sub-page:horizontal { background: #4a946c; border-radius: 2px; }
+        """)
+        self.iv_slider.valueChanged.connect(self._on_interval)
+        layout.addWidget(self.iv_slider)
+
+        hint = QLabel("작을수록 많은 이미지 추출 (최소 1초)")
+        hint.setStyleSheet("font-size: 10px; color: #64748b;")
+        layout.addWidget(hint)
+
+        # 이미지 포맷
+        fmt_label = QLabel("이미지 포맷")
+        fmt_label.setStyleSheet("font-size: 13px; font-weight: bold;")
+        layout.addWidget(fmt_label)
+
+        from PyQt6.QtWidgets import QRadioButton, QButtonGroup
+        fmt_layout = QHBoxLayout()
+        self.fmt_group = QButtonGroup(self)
+        for i, (val, label) in enumerate([('webp', 'WEBP'), ('jpg', 'JPEG'), ('png', 'PNG')]):
+            rb = QRadioButton(label)
+            rb.setStyleSheet("""
+                QRadioButton { color: #e2e8f0; font-size: 12px; spacing: 6px; }
+                QRadioButton::indicator { width: 16px; height: 16px; border: 2px solid #64748b; border-radius: 9px; background: transparent; }
+                QRadioButton::indicator:checked { border: 2px solid #3b82f6; background: #3b82f6; }
+                QRadioButton::indicator:hover { border-color: #94a3b8; }
+            """)
+            if i == 0:
+                rb.setChecked(True)
+            self.fmt_group.addButton(rb, i)
+            fmt_layout.addWidget(rb)
+            rb.toggled.connect(lambda checked, v=val: self._on_format(v) if checked else None)
+        fmt_layout.addStretch()
+        layout.addLayout(fmt_layout)
+
+        fmt_hint = QLabel("WebP - 최고 압축률 (권장)")
+        fmt_hint.setStyleSheet("font-size: 10px; color: #64748b;")
+        self.fmt_hint = fmt_hint
+        layout.addWidget(fmt_hint)
+
+        layout.addStretch()
+
+        # 추출 시작 버튼
+        self.start_btn = QPushButton("추출 시작")
+        self.start_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.start_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3b82f6; color: #ffffff; border: none;
+                border-radius: 8px; padding: 12px; font-size: 14px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #2563eb; }
+        """)
+        self.start_btn.clicked.connect(self.accept)
+        layout.addWidget(self.start_btn)
+
+    def _on_interval(self, val):
+        self.interval = val
+        self.iv_value.setText(f"{val}초마다")
+
+    def _on_format(self, fmt):
+        self.img_format = fmt
+        hints = {'webp': 'WebP - 최고 압축률 (권장)', 'jpg': 'JPEG - 호환성 최고', 'png': 'PNG - 무손실 (용량 큼)'}
+        self.fmt_hint.setText(hints.get(fmt, ''))
+
+
+class TextExtractWorker(QThread):
+    """영상에서 텍스트 추출 워커 (yt-dlp → ffmpeg 프레임 → easyocr)"""
+    progress = pyqtSignal(dict)
+    finished = pyqtSignal(dict)
+    info_ready = pyqtSignal(dict)
+
+    def __init__(self, url, output_path, interval=2.0, langs=None):
+        super().__init__()
+        self.url = url
+        self.output_path = output_path
+        self.interval = interval
+        self.langs = langs or ['ko', 'en']
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        try:
+            ffmpeg_bin = _find_ffmpeg()
+            if not ffmpeg_bin:
+                self.finished.emit({'success': False, 'title': '', 'path': '', 'error': 'ffmpeg가 설치되어 있지 않습니다'})
+                return
+
+            # 1단계: 영상 다운로드
+            tmp_dir = os.path.join(self.output_path, '_tmp_ocr')
+            os.makedirs(tmp_dir, exist_ok=True)
+
+            ydl_opts = {
+                'outtmpl': os.path.join(tmp_dir, 'video.%(ext)s'),
+                'format': 'best',
+                'quiet': True, 'no_warnings': True, 'noplaylist': True,
+                'progress_hooks': [self._dl_hook],
+            }
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(self.url, download=False)
+                title = info.get('title', 'Unknown')
+                duration = info.get('duration') or 0
+                dur_str = f"{int(duration) // 60}:{int(duration) % 60:02d}" if duration else ""
+                self.info_ready.emit({'title': title, 'duration': dur_str, 'thumbnail': info.get('thumbnail', '')})
+
+                if self._cancelled:
+                    self._cleanup(tmp_dir)
+                    self.finished.emit({'success': False, 'title': title, 'path': '', 'error': 'Cancelled'})
+                    return
+                ydl.download([self.url])
+
+            if self._cancelled:
+                self._cleanup(tmp_dir)
+                self.finished.emit({'success': False, 'title': title, 'path': '', 'error': 'Cancelled'})
+                return
+
+            # 다운로드된 파일 찾기
+            video_file = None
+            for f in os.listdir(tmp_dir):
+                if f.startswith('video.'):
+                    video_file = os.path.join(tmp_dir, f)
+                    break
+            if not video_file:
+                self._cleanup(tmp_dir)
+                self.finished.emit({'success': False, 'title': title, 'path': '', 'error': '영상 파일을 찾을 수 없습니다'})
+                return
+
+            # 2단계: ffmpeg로 프레임 추출
+            self.progress.emit({'percent': 30.0, 'speed': '프레임 추출 중...', 'eta': ''})
+            frames_dir = os.path.join(tmp_dir, 'frames')
+            os.makedirs(frames_dir, exist_ok=True)
+
+            cmd = [
+                ffmpeg_bin, '-i', video_file,
+                '-vf', f'fps=1/{self.interval}',
+                '-q:v', '2',
+                os.path.join(frames_dir, 'frame_%04d.jpg'),
+                '-y', '-hide_banner', '-loglevel', 'error',
+            ]
+            subprocess.run(cmd, capture_output=True, text=True, timeout=300, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0)
+
+            frame_files = sorted([f for f in os.listdir(frames_dir) if f.endswith('.jpg')])
+            if not frame_files:
+                self._cleanup(tmp_dir)
+                self.finished.emit({'success': False, 'title': title, 'path': '', 'error': '프레임 추출 실패'})
+                return
+
+            # 3단계: 별도 프로세스에서 easyocr 실행 (DLL 충돌 방지)
+            self.progress.emit({'percent': 40.0, 'speed': 'OCR 처리 중...', 'eta': ''})
+
+            ocr_helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ocr_helper.py')
+            ocr_output = os.path.join(tmp_dir, 'ocr_result.json')
+            # pythonw.exe는 stdout이 없으므로 python.exe 사용
+            python_exe = sys.executable.replace('pythonw.exe', 'python.exe')
+
+            langs_str = ','.join(self.langs)
+            env = os.environ.copy()
+            env['PYTHONIOENCODING'] = 'utf-8'
+            proc = subprocess.Popen(
+                [python_exe, ocr_helper, frames_dir, ocr_output, str(self.interval), langs_str],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding='utf-8', errors='replace',
+                env=env,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0,
+            )
+
+            # stdout에서 진행률 읽기
+            debug_lines = []
+            for line in proc.stdout:
+                line = line.strip()
+                if self._cancelled:
+                    proc.kill()
+                    self._cleanup(tmp_dir)
+                    self.finished.emit({'success': False, 'title': title, 'path': '', 'error': 'Cancelled'})
+                    return
+                if line.startswith('DEBUG:'):
+                    debug_lines.append(line)
+                elif line.startswith('PROGRESS:'):
+                    parts = line.replace('PROGRESS:', '').split('/')
+                    if len(parts) == 2:
+                        try:
+                            cur, total = int(parts[0]), int(parts[1])
+                            pct = 40 + (cur / total) * 55
+                            self.progress.emit({'percent': pct, 'speed': f'OCR {cur}/{total}', 'eta': ''})
+                        except ValueError:
+                            pass
+
+            proc.wait(timeout=600)
+
+            # 4단계: 결과 읽기 (returncode 무시 - OpenCV 경고로 non-zero 가능)
+            debug_info = '\n'.join(debug_lines)
+            if not os.path.exists(ocr_output):
+                stderr = proc.stderr.read() if proc.stderr else ''
+                self._cleanup(tmp_dir)
+                self.finished.emit({'success': False, 'title': title, 'path': '', 'error': f'OCR 실패:\n{debug_info}\n{stderr[:200]}'})
+                return
+
+            import json
+            with open(ocr_output, 'r', encoding='utf-8') as f:
+                ocr_data = json.load(f)
+
+            # ocr_helper에서 에러가 발생한 경우
+            if 'error' in ocr_data:
+                self._cleanup(tmp_dir)
+                self.finished.emit({'success': False, 'title': title, 'path': '', 'error': ocr_data['error']})
+                return
+
+            filtered = ocr_data.get('texts', [])
+            watermarks = ocr_data.get('watermarks', [])
+            total_frames = ocr_data.get('total_frames', 0)
+
+            text_lines = []
+            for item in filtered:
+                text_lines.append(f"[{item['time']}] {item['text']}")
+            extracted_text = '\n'.join(text_lines)
+
+            # 텍스트 0개일 때 디버그 정보 표시
+            if not filtered and debug_info:
+                extracted_text = f"[디버그 정보]\n{debug_info}\n프레임 수: {total_frames}"
+
+            self._cleanup(tmp_dir)
+            self.progress.emit({'percent': 100.0, 'speed': '', 'eta': ''})
+            self.finished.emit({
+                'success': True,
+                'title': title,
+                'path': self.output_path,
+                'error': '',
+                'extracted_text': extracted_text,
+                'text_count': len(filtered),
+                'watermark_count': len(watermarks),
+                'is_text_extract': True,
+            })
+
+        except Exception as e:
+            self.finished.emit({'success': False, 'title': '', 'path': '', 'error': str(e)})
+
+    def _dl_hook(self, d):
+        if self._cancelled:
+            raise yt_dlp.utils.DownloadCancelled()
+        if d['status'] == 'downloading':
+            percent = 0.0
+            if d.get('total_bytes'):
+                percent = d.get('downloaded_bytes', 0) / d['total_bytes'] * 100
+            elif d.get('total_bytes_estimate'):
+                percent = d.get('downloaded_bytes', 0) / d['total_bytes_estimate'] * 100
+            self.progress.emit({'percent': percent * 0.28, 'speed': d.get('_speed_str', '').strip(), 'eta': d.get('_eta_str', '').strip()})
+        elif d['status'] == 'finished':
+            self.progress.emit({'percent': 28.0, 'speed': '', 'eta': ''})
+
+    @staticmethod
+    def _cleanup(tmp_dir):
+        import shutil
+        import time
+        for attempt in range(3):
+            try:
+                shutil.rmtree(tmp_dir)
+                return
+            except Exception:
+                time.sleep(0.5)
+        # 최종 시도
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+class TextExtractDialog(QDialog):
+    """텍스트 추출 확인 다이얼로그"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("텍스트 추출")
+        self.setFixedSize(380, 200)
+        self.setStyleSheet("""
+            QDialog { background-color: #0f172a; }
+            QLabel { color: #e2e8f0; }
+        """)
+        self.interval = 1.0
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 20)
+        layout.setSpacing(14)
+
+        title = QLabel("\U0001f4c4  텍스트 추출 (OCR)")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffffff;")
+        layout.addWidget(title)
+
+        desc = QLabel("영상의 모든 프레임에서 텍스트를 추출합니다.\n로고, 워터마크 등 반복되는 텍스트는 자동으로 필터링됩니다.")
+        desc.setStyleSheet("font-size: 12px; color: #94a3b8; line-height: 1.6;")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        layout.addStretch()
+
+        # 추출 시작 버튼
+        self.start_btn = QPushButton("추출 시작")
+        self.start_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.start_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3b82f6; color: #ffffff; border: none;
+                border-radius: 8px; padding: 12px; font-size: 14px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #2563eb; }
+        """)
+        self.start_btn.clicked.connect(self.accept)
+        layout.addWidget(self.start_btn)
+
+class TextExtractResultDialog(QDialog):
+    """텍스트 추출 결과 다이얼로그 - 복사/다운로드 가능"""
+
+    def __init__(self, title, text, text_count, watermark_count, output_path, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("텍스트 추출")
+        self.setMinimumSize(560, 480)
+        self.resize(560, 520)
+        self._title = title
+        self._text = text
+        self._output_path = output_path
+        self.setStyleSheet("""
+            QDialog { background-color: #ffffff; }
+            QLabel { color: #1e293b; background: transparent; }
+            QPushButton { background: transparent; }
+        """)
+        self._setup_ui(title, text, text_count, watermark_count)
+
+    def _setup_ui(self, title, text, text_count, watermark_count):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 24, 28, 20)
+        layout.setSpacing(12)
+
+        # 헤더
+        header = QHBoxLayout()
+        icon = QLabel("\U0001f4c4")
+        icon.setStyleSheet("font-size: 22px;")
+        header.addWidget(icon)
+        h_title = QLabel(f"  <b>텍스트 추출</b>  <span style='color:#94a3b8; font-size:13px;'>· {title[:40]}</span>")
+        h_title.setStyleSheet("font-size: 18px; color: #0f172a;")
+        header.addWidget(h_title)
+        header.addStretch()
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(32, 32)
+        close_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        close_btn.setStyleSheet("""
+            QPushButton { background: transparent; border: none; font-size: 18px; color: #94a3b8; border-radius: 16px; }
+            QPushButton:hover { background: #f1f5f9; color: #475569; }
+        """)
+        close_btn.clicked.connect(self.close)
+        header.addWidget(close_btn)
+        layout.addLayout(header)
+
+        # 카운트 설명
+        count_text = f"{text_count}개의 텍스트가 추출되었습니다."
+        if watermark_count > 0:
+            count_text += f" (워터마크 {watermark_count}개 필터링됨)"
+        desc = QLabel(count_text)
+        desc.setStyleSheet("font-size: 13px; color: #64748b;")
+        layout.addWidget(desc)
+
+        # 텍스트 영역
+        from PyQt6.QtWidgets import QTextEdit
+        self.text_edit = QTextEdit()
+        self.text_edit.setReadOnly(True)
+        self.text_edit.setPlainText(text if text else "(추출된 텍스트가 없습니다)")
+        self.text_edit.setStyleSheet("""
+            QTextEdit {
+                background-color: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 10px;
+                padding: 16px; font-size: 14px; color: #1e293b; line-height: 1.6;
+                font-family: 'Noto Sans KR', 'Malgun Gothic', sans-serif;
+            }
+        """)
+        layout.addWidget(self.text_edit, 1)
+
+        # 하단 버튼
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        copy_btn = QPushButton("  복사")
+        copy_btn.setIcon(self.style().standardIcon(self.style().StandardPixmap.SP_FileIcon))
+        copy_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        copy_btn.setStyleSheet("""
+            QPushButton {
+                background: #ffffff; border: 1px solid #d1d5db; border-radius: 8px;
+                padding: 10px 20px; font-size: 14px; font-weight: bold; color: #374151;
+            }
+            QPushButton:hover { background: #f9fafb; border-color: #9ca3af; }
+        """)
+        copy_btn.clicked.connect(self._copy)
+        btn_row.addWidget(copy_btn)
+
+        download_btn = QPushButton("  다운로드")
+        download_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        download_btn.setStyleSheet("""
+            QPushButton {
+                background: #3b82f6; border: none; border-radius: 8px;
+                padding: 10px 24px; font-size: 14px; font-weight: bold; color: #ffffff;
+            }
+            QPushButton:hover { background: #2563eb; }
+        """)
+        download_btn.clicked.connect(self._download)
+        btn_row.addWidget(download_btn)
+
+        layout.addLayout(btn_row)
+
+    def _copy(self):
+        from PyQt6.QtWidgets import QApplication
+        QApplication.clipboard().setText(self._text)
+        # 임시 토스트
+        sender = self.sender()
+        if sender:
+            sender.setText("  복사됨!")
+            QTimer.singleShot(1500, lambda: sender.setText("  복사"))
+
+    def _download(self):
+        safe_title = "".join(c for c in self._title if c not in r'<>:"/\|?*').strip()[:60] or 'text'
+        out_file = os.path.join(self._output_path, f"{safe_title}_텍스트.txt")
+        try:
+            with open(out_file, 'w', encoding='utf-8') as f:
+                f.write(f"# {self._title}\n\n")
+                f.write(self._text)
+            # 파일 위치 열기
+            os.startfile(os.path.dirname(out_file))
+            sender = self.sender()
+            if sender:
+                sender.setText("  저장 완료!")
+                QTimer.singleShot(1500, lambda: sender.setText("  다운로드"))
+        except Exception as e:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "저장 실패", str(e))
+
+
 class DownloaderSettingsDialog(QDialog):
     """다운로더 전용 설정 다이얼로그"""
 
@@ -2565,15 +3235,21 @@ class DownloaderSettingsDialog(QDialog):
         self.grp_folder_input.setStyleSheet("min-height: 16px; font-size: 12px;")
         gbl.addWidget(self.grp_folder_input)
 
-        add_btn = QPushButton("+")
-        add_btn.setFixedSize(32, 32)
-        add_btn.setStyleSheet("min-height: 16px; font-size: 14px; font-weight: bold;")
+        add_btn = QPushButton("추가")
+        add_btn.setFixedSize(48, 32)
+        add_btn.setStyleSheet("""
+            QPushButton { min-height: 16px; font-size: 12px; color: #4ade80; background: #2a2a3e; border: 1px solid #4ade80; border-radius: 4px; padding: 0px; }
+            QPushButton:hover { background: #3a3a5e; }
+        """)
         add_btn.clicked.connect(self._add_group)
         gbl.addWidget(add_btn)
 
-        del_btn = QPushButton("-")
-        del_btn.setFixedSize(32, 32)
-        del_btn.setStyleSheet("min-height: 16px; font-size: 14px; font-weight: bold;")
+        del_btn = QPushButton("삭제")
+        del_btn.setFixedSize(48, 32)
+        del_btn.setStyleSheet("""
+            QPushButton { min-height: 16px; font-size: 12px; color: #f87171; background: #2a2a3e; border: 1px solid #f87171; border-radius: 4px; padding: 0px; }
+            QPushButton:hover { background: #3a3a5e; }
+        """)
         del_btn.clicked.connect(self._del_group)
         gbl.addWidget(del_btn)
 
@@ -2649,13 +3325,15 @@ class DownloaderPage(QWidget):
             border-radius: 6px;
             color: #ffffff;
             font-size: 12px;
-            padding: 4px 8px;
+            padding: 4px 24px 4px 8px;
             min-height: 28px;
         }
         QComboBox:hover { border-color: #4a946c; }
         QComboBox::drop-down {
+            subcontrol-origin: padding;
+            subcontrol-position: center right;
+            width: 22px;
             border: none;
-            width: 20px;
         }
         QComboBox::down-arrow {
             image: none;
@@ -2718,10 +3396,24 @@ class DownloaderPage(QWidget):
         opt_layout.addWidget(fmt_label)
 
         self.format_combo = QComboBox()
-        self.format_combo.addItems(["영상 (MP4)", "오디오 (MP3)"])
-        self.format_combo.setFixedWidth(130)
+        self.format_combo.addItems(["영상 (MP4)", "오디오 (MP3)", "자막 (SRT)", "모두 (MP4+MP3+SRT)", "이미지 추출"])
+        self.format_combo.setFixedWidth(160)
         self.format_combo.setStyleSheet(self.COMBO_STYLE)
-        opt_layout.addWidget(self.format_combo)
+
+        fmt_wrap = QFrame()
+        fmt_wrap.setFixedWidth(160)
+        fmt_wrap.setStyleSheet("background: transparent; border: none;")
+        fmt_wrap_layout = QHBoxLayout(fmt_wrap)
+        fmt_wrap_layout.setContentsMargins(0, 0, 0, 0)
+        fmt_wrap_layout.setSpacing(0)
+        fmt_wrap_layout.addWidget(self.format_combo)
+        fmt_arrow = QLabel("\u25BE")
+        fmt_arrow.setFixedWidth(18)
+        fmt_arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        fmt_arrow.setStyleSheet("color: #64748b; font-size: 11px; background: transparent; border: none;")
+        fmt_arrow.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        fmt_wrap_layout.addWidget(fmt_arrow, 0, Qt.AlignmentFlag.AlignRight)
+        opt_layout.addWidget(fmt_wrap)
 
         opt_layout.addSpacing(12)
 
@@ -2733,7 +3425,21 @@ class DownloaderPage(QWidget):
         self.group_combo.setFixedWidth(150)
         self.group_combo.setStyleSheet(self.COMBO_STYLE)
         self._refresh_groups()
-        opt_layout.addWidget(self.group_combo)
+
+        grp_wrap = QFrame()
+        grp_wrap.setFixedWidth(150)
+        grp_wrap.setStyleSheet("background: transparent; border: none;")
+        grp_wrap_layout = QHBoxLayout(grp_wrap)
+        grp_wrap_layout.setContentsMargins(0, 0, 0, 0)
+        grp_wrap_layout.setSpacing(0)
+        grp_wrap_layout.addWidget(self.group_combo)
+        grp_arrow = QLabel("\u25BE")
+        grp_arrow.setFixedWidth(18)
+        grp_arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        grp_arrow.setStyleSheet("color: #64748b; font-size: 11px; background: transparent; border: none;")
+        grp_arrow.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        grp_wrap_layout.addWidget(grp_arrow, 0, Qt.AlignmentFlag.AlignRight)
+        opt_layout.addWidget(grp_wrap)
 
         opt_layout.addStretch()
         layout.addLayout(opt_layout)
@@ -2942,7 +3648,7 @@ class DownloaderPage(QWidget):
             self.empty_widget.hide()
 
         # 형식 & 그룹
-        audio_only = self.format_combo.currentIndex() == 1
+        fmt_index = self.format_combo.currentIndex()
         group_name = self.group_combo.currentText()
 
         # 저장 경로
@@ -2951,35 +3657,83 @@ class DownloaderPage(QWidget):
         else:
             output_path = os.path.join(os.path.expanduser('~'), 'Downloads')
 
-        # 아이템 ID
-        item_id = str(uuid.uuid4())[:8]
+        # 이미지 추출 모드 (index 4): 다이얼로그 띄우고 별도 워커
+        if fmt_index == 4:
+            dlg = FrameExtractDialog(self)
+            if not dlg.exec():
+                return  # 취소
+            interval = dlg.interval
+            img_format = dlg.img_format
 
-        # 카드 생성
-        card = DownloadItemCard(item_id, url, output_path=output_path)
-        card.cancelClicked.connect(self.on_cancel)
-        self.queue_layout.insertWidget(self.queue_layout.count() - 1, card)
-        self.cards[item_id] = card
+            # 상태 바
+            self.status_dot.setStyleSheet("color: #4a946c; font-size: 8px; border: none; background: transparent;")
+            self.status_text.setText("이미지 추출 중...")
+            self.path_label.setText(f"저장: {output_path}")
 
-        # 카운트 업데이트
-        self.queue_count += 1
-        self.q_count.setText(str(self.queue_count))
+            item_id = str(uuid.uuid4())[:8]
+            card = DownloadItemCard(item_id, url, output_path=output_path)
+            card.set_title(f"이미지 추출 준비 중... [{img_format.upper()}]")
+            card.cancelClicked.connect(self.on_cancel)
+            self.queue_layout.insertWidget(self.queue_layout.count() - 1, card)
+            self.cards[item_id] = card
+            self.queue_count += 1
+            self.q_count.setText(str(self.queue_count))
+
+            worker = FrameExtractWorker(url, output_path, interval, img_format)
+            worker.info_ready.connect(lambda info, c=card: c.set_title(f"🖼 {info['title']}"))
+            worker.progress.connect(lambda p, c=card: c.set_progress(p['percent'], p.get('speed', ''), p.get('eta', '')))
+            worker.finished.connect(lambda r, iid=item_id: self._on_finished(iid, r))
+            self.workers[item_id] = worker
+            worker.start()
+            return
+
+
+        # 모드 결정: 0=video, 1=audio, 2=subtitle, 3=all
+        if fmt_index == 3:
+            modes = [('video', '[MP4]'), ('audio', '[MP3]'), ('subtitle', '[SRT]')]
+        elif fmt_index == 2:
+            modes = [('subtitle', '')]
+        elif fmt_index == 1:
+            modes = [('audio', '')]
+        else:
+            modes = [('video', '')]
 
         # 상태 바 업데이트
         self.status_dot.setStyleSheet("color: #4a946c; font-size: 8px; border: none; background: transparent;")
         self.status_text.setText("다운로드 중...")
         self.path_label.setText(f"저장: {output_path}")
 
-        # 워커 시작 (도우인/틱톡이면 DouyinDownloadWorker, 나머지는 yt-dlp)
         is_douyin = any(k in url.lower() for k in ['douyin.com', 'v.douyin.com', 'tiktok.com', 'vt.tiktok.com'])
-        if is_douyin:
-            worker = DouyinDownloadWorker(url, output_path)
-        else:
-            worker = DownloadWorker(url, output_path, audio_only)
-        worker.info_ready.connect(lambda info, c=card: c.set_title(info['title']))
-        worker.progress.connect(lambda p, c=card: c.set_progress(p['percent'], p.get('speed', ''), p.get('eta', '')))
-        worker.finished.connect(lambda r, iid=item_id: self._on_finished(iid, r))
-        self.workers[item_id] = worker
-        worker.start()
+
+        for mode, tag in modes:
+            item_id = str(uuid.uuid4())[:8]
+
+            # 카드 생성
+            card = DownloadItemCard(item_id, url, output_path=output_path)
+            if tag:
+                card.set_title(f"다운로드 준비 중... {tag}")
+            card.cancelClicked.connect(self.on_cancel)
+            self.queue_layout.insertWidget(self.queue_layout.count() - 1, card)
+            self.cards[item_id] = card
+
+            # 카운트 업데이트
+            self.queue_count += 1
+            self.q_count.setText(str(self.queue_count))
+
+            # 워커 시작
+            if is_douyin and mode == 'video':
+                worker = DouyinDownloadWorker(url, output_path)
+            else:
+                worker = DownloadWorker(url, output_path, mode)
+
+            if tag:
+                worker.info_ready.connect(lambda info, c=card, t=tag: c.set_title(f"{info['title']} {t}"))
+            else:
+                worker.info_ready.connect(lambda info, c=card: c.set_title(info['title']))
+            worker.progress.connect(lambda p, c=card: c.set_progress(p['percent'], p.get('speed', ''), p.get('eta', '')))
+            worker.finished.connect(lambda r, iid=item_id: self._on_finished(iid, r))
+            self.workers[item_id] = worker
+            worker.start()
 
     def on_cancel(self, item_id):
         worker = self.workers.get(item_id)
@@ -2993,6 +3747,18 @@ class DownloaderPage(QWidget):
         card = self.cards.get(item_id)
         if card:
             card.set_finished(result['success'], result.get('error', ''))
+
+        # 텍스트 추출 성공 시 결과 다이얼로그 표시
+        if result.get('is_text_extract') and result.get('success'):
+            dlg = TextExtractResultDialog(
+                title=result.get('title', ''),
+                text=result.get('extracted_text', ''),
+                text_count=result.get('text_count', 0),
+                watermark_count=result.get('watermark_count', 0),
+                output_path=result.get('path', ''),
+                parent=self,
+            )
+            dlg.exec()
 
         # 워커 정리
         worker = self.workers.pop(item_id, None)
@@ -4872,8 +5638,73 @@ class MainShell(QMainWindow):
         # 트레이 아이콘 설정
         self.setup_tray()
 
+        # QLocalServer: 다른 인스턴스에서 tubiq:// URL 수신
+        self._local_server = QLocalServer(self)
+        self._local_server.removeServer('qfred-protocol')  # 이전 서버 정리
+        if self._local_server.listen('qfred-protocol'):
+            self._local_server.newConnection.connect(self._on_local_connection)
+            print("[MainShell] QLocalServer 시작: qfred-protocol")
+
         # 기본 페이지: Snippets
         self.switch_page(0)
+
+    def _on_local_connection(self):
+        """다른 인스턴스에서 URL을 수신"""
+        socket = self._local_server.nextPendingConnection()
+        if socket:
+            socket.waitForReadyRead(3000)
+            data = socket.readAll().data().decode('utf-8').strip()
+            socket.disconnectFromServer()
+            if data:
+                print(f"[MainShell] URL 수신: {data}")
+                self.handle_protocol_url(data)
+
+    def handle_protocol_url(self, url: str):
+        """tubiq://download?videoId=xxx - 백그라운드 다운로드 (창 안 띄움)"""
+        try:
+            parsed = urlparse(url)
+            if parsed.scheme != 'tubiq':
+                print(f"[MainShell] 알 수 없는 프로토콜: {parsed.scheme}")
+                return
+
+            params = parse_qs(parsed.query)
+            video_id = params.get('videoId', [None])[0]
+            if not video_id:
+                print("[MainShell] videoId 없음")
+                return
+
+            youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+            title_hint = params.get('title', [''])[0] or video_id
+            output_path = self.app_settings.get_download_path("YouTube")
+
+            print(f"[MainShell] 백그라운드 다운로드: {youtube_url} → {output_path}")
+            self.tray_icon.showMessage("Qfred", f"다운로드 시작: {title_hint}", QSystemTrayIcon.MessageIcon.Information, 3000)
+
+            # 백그라운드 워커
+            worker = DownloadWorker(youtube_url, output_path, 'video')
+            title_box = [title_hint]  # mutable for closure
+
+            def on_info(info):
+                title_box[0] = info.get('title', title_hint)
+
+            def on_finished(result):
+                if result.get('success'):
+                    self.tray_icon.showMessage("Qfred", f"다운로드 완료: {title_box[0]}", QSystemTrayIcon.MessageIcon.Information, 5000)
+                else:
+                    self.tray_icon.showMessage("Qfred", f"다운로드 실패: {result.get('error', '')}", QSystemTrayIcon.MessageIcon.Warning, 5000)
+                if worker in self._bg_workers:
+                    self._bg_workers.remove(worker)
+
+            worker.info_ready.connect(on_info)
+            worker.finished.connect(on_finished)
+
+            if not hasattr(self, '_bg_workers'):
+                self._bg_workers = []
+            self._bg_workers.append(worker)
+            worker.start()
+
+        except Exception as e:
+            print(f"[MainShell] URL 처리 오류: {e}")
 
     def switch_page(self, index):
         self.page_stack.setCurrentIndex(index)
@@ -4990,6 +5821,29 @@ def kill_existing_qfred():
 
 
 def main():
+    # tubiq:// URL 인자 추출
+    protocol_url = None
+    for arg in sys.argv[1:]:
+        if arg.startswith('tubiq://'):
+            protocol_url = arg
+            break
+
+    # URL 인자가 있으면 → 기존 인스턴스에 전달 시도
+    if protocol_url:
+        temp_app = QApplication(sys.argv)
+        socket = QLocalSocket()
+        socket.connectToServer('qfred-protocol')
+        if socket.waitForConnected(2000):
+            socket.write(protocol_url.encode('utf-8'))
+            socket.flush()
+            socket.waitForBytesWritten(2000)
+            socket.disconnectFromServer()
+            print(f"[Startup] URL을 기존 Qfred에 전달: {protocol_url}")
+            sys.exit(0)
+        else:
+            print("[Startup] 기존 Qfred 없음, 새로 시작합니다...")
+        del temp_app
+
     # 기존 Q-fred 프로세스 강제 종료 후 시작
     import tempfile
     lock_file = os.path.join(tempfile.gettempdir(), "qfred.lock")
@@ -4999,9 +5853,10 @@ def main():
         import msvcrt
         msvcrt.locking(lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
     except:
-        # 이미 실행 중 → 기존 프로세스 강제 종료
-        print("[Startup] 기존 Q-fred 감지, 강제 종료 후 재시작...")
-        kill_existing_qfred()
+        # 이미 실행 중 → URL이 없으면 기존 강제 종료, URL 있으면 이미 위에서 전달 시도함
+        if not protocol_url:
+            print("[Startup] 기존 Q-fred 감지, 강제 종료 후 재시작...")
+            kill_existing_qfred()
         # 락 파일 삭제 후 다시 시도
         try:
             os.remove(lock_file)
@@ -5032,6 +5887,9 @@ def main():
     # 앱 설정 초기화
     app_settings = AppSettings()
 
+    # tubiq:// 프로토콜 등록 (매 실행마다 갱신)
+    app_settings.register_protocol()
+
     # 저장 폴더 생성
     os.makedirs(app_settings.storage_folder, exist_ok=True)
 
@@ -5050,6 +5908,10 @@ def main():
 
     # 엔진 시작 (창이 숨겨져 있어도 동작)
     engine.start()
+
+    # tubiq:// URL이 전달된 경우 → 다운로드 시작
+    if protocol_url:
+        QTimer.singleShot(500, lambda: window.handle_protocol_url(protocol_url))
 
     # 백그라운드에서 업데이트 체크
     def check_update_background():
